@@ -1,0 +1,7 @@
+{
+  "model": "gemma3:4b-it-q4_K_M",
+  "user_name": "マスター",
+  "alice_name": "アリス",
+  "voice": "春日部つむぎ",
+  "voice_enabled": true
+}
