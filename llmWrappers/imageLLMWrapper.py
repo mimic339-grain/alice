@@ -41,19 +41,23 @@ class ImageLLMWrapper(AbstractLLMWrapper):
             "skip_special_tokens": False,  # Necessary for Llama 3
             "custom_token_bans": BANNED_TOKENS,
             "stop": STOP_STRINGS,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": self.generate_prompt()
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{self.screen_shot()}"
-                        }
-                    }
-                ]
-            }]
+            # generate_prompt() returns real chat turns. The image has to ride along with the
+            # last user turn, so that one turn's content becomes the text+image list the
+            # vision API expects while every earlier turn stays an ordinary message.
+            "messages": self._attach_image(self.generate_prompt())
         }
+
+    def _attach_image(self, messages):
+        """Turn the final user turn into the text+image content list the vision API expects."""
+        messages = list(messages)
+        image_part = {"type": "image_url",
+                      "image_url": {"url": f"data:image/jpeg;base64,{self.screen_shot()}"}}
+
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == "user":
+                text_part = {"type": "text", "text": messages[i]["content"]}
+                messages[i] = {"role": "user", "content": [text_part, image_part]}
+                return messages
+
+        messages.append({"role": "user", "content": [{"type": "text", "text": ""}, image_part]})
+        return messages

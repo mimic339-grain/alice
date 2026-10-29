@@ -1,8 +1,13 @@
 import asyncio
+import logging
 import queue
 import pyvts
+
+# The websockets library logs every frame at DEBUG, which buries the app's own output once the
+# lip-sync loop starts sending parameter updates several times a second.
+logging.getLogger("websockets").setLevel(logging.WARNING)
 from modules.module import Module
-from constants import VTUBE_MODEL_POSITIONS, VTUBE_MIC_POSITION
+from constants import VTUBE_MODEL_POSITIONS, VTUBE_MIC_POSITION, EMOTION_HOTKEYS
 
 
 class VtubeStudio(Module):
@@ -13,6 +18,7 @@ class VtubeStudio(Module):
 
         self.item_list = []
         self.prop_instance_ids = {}
+        self.available_hotkeys = []
 
         plugin_info = {
             "plugin_name": "Neuro VTS Plugin",
@@ -131,6 +137,23 @@ class VtubeStudio(Module):
         )
         await self.send_request(request)
 
+    async def set_mouth(self, openness):
+        """Push one mouth-open value to the model."""
+        request = self.vts.vts_request.requestSetParameterValue("MouthOpen", openness)
+        await self.vts.request(request)
+
+    async def apply_emotion(self, emotion):
+        """Trigger the hotkey mapped to an emotion, if the loaded model has one.
+
+        Expressions live in the model, so the mapping is by name: whatever hotkey the user has
+        called "happy" gets fired for [happy]. A model with no matching hotkey simply keeps its
+        current face rather than erroring.
+        """
+        hotkey = EMOTION_HOTKEYS.get(emotion)
+        if not hotkey or hotkey not in self.available_hotkeys:
+            return
+        await self.send_hotkey(hotkey)
+
     async def send_request(self, request):
         response = await self.vts.request(request)
         if response["messageType"] == "APIError":
@@ -155,6 +178,15 @@ class VtubeStudio(Module):
         await self.vts.request_authenticate()  # use token
 
         self.item_list = await self.get_item_list()
+        try:
+            self.available_hotkeys = await self.get_hotkeys()
+            print(f"VTS: hotkeys available: {self.available_hotkeys}")
+        except Exception as e:
+            print(f"VTS: could not read hotkeys ({e})")
+            self.available_hotkeys = []
+
+        closing_frames = 0
+        last_emotion = None
 
         # Run the request processor loop - Read requests from queue and process them
         # This is done because the API functions are called directly by other threads but actually interacting with the
@@ -168,6 +200,26 @@ class VtubeStudio(Module):
             if not self.enabled:
                 await asyncio.sleep(0.1)
                 continue
+
+            # Lip sync. A value injected through the API decays back to the model's default
+            # unless it keeps being refreshed, so this resends every tick while talking rather
+            # than only when the number changes. Once speech ends it sends a few closing frames
+            # and then goes quiet, so a silent model costs no traffic.
+            mouth = self.signals.mouth_openness
+            if self.signals.AI_speaking or mouth > 0.01 or closing_frames > 0:
+                closing_frames = 5 if self.signals.AI_speaking else max(0, closing_frames - 1)
+                try:
+                    await self.set_mouth(mouth)
+                except Exception:
+                    pass
+
+            # Expression follows the emotion tag the LLM produced.
+            if self.signals.current_emotion != last_emotion:
+                last_emotion = self.signals.current_emotion
+                try:
+                    await self.apply_emotion(last_emotion)
+                except Exception as e:
+                    print(f"VTS: expression change failed ({e})")
 
             if self.queue.qsize() > 0:
                 crr_action = self.queue.get()
@@ -187,8 +239,10 @@ class VtubeStudio(Module):
                 else:
                     print(f"Unknown Vtube Studio action: {crr_action.action}")
 
-            # Yield for other threads to run
-            await asyncio.sleep(0)
+            # Pace the loop. It used to spin with sleep(0), which was harmless when the loop only
+            # drained a queue, but now that every tick can send a websocket request it saturates
+            # the connection and floods the log. 20fps is smooth for a mouth and costs nothing.
+            await asyncio.sleep(0.05)
 
     class Action:
         def __init__(self, action, data):

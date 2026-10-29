@@ -1,3 +1,5 @@
+import json
+import os
 import time
 from aiohttp import web
 import socketio
@@ -120,8 +122,57 @@ class SocketIOServer:
 
         @sio.event
         async def new_topic(sid, message):
+            # Logged with its own prefix so the transcript shows which route a turn came in on.
+            # Without this, a typed message and a spoken one are indistinguishable in the log --
+            # the AI just starts talking, and it looks like the mic fired when it did not.
+            print("CHAT INPUT: " + message)
+            self.signals.current_turn_id = self.signals.log.begin_turn("chat", message)
+            # The page needs the id so feedback on this reply can be filed under it.
+            await sio.emit('turn_id', self.signals.current_turn_id)
             self.signals.history.append({"role": "user", "content": message})
             self.signals.new_message = True
+
+        # Feedback lands in a JSONL file next to the code, one record per line. This is the
+        # training set: fine-tuning needs hundreds of (what was said -> what she should have
+        # said) pairs, and the only way to get them is to collect them while actually talking
+        # to her. Appending rather than rewriting means a crash can never lose what came before.
+        feedback_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'feedback.jsonl')
+
+        @sio.event
+        async def feedback(sid, entry):
+            if not isinstance(entry, dict):
+                return
+            record = {
+                "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "verdict": entry.get("verdict"),          # "good" or "rewrite"
+                "user": entry.get("user", ""),            # what was said to her
+                "alice": entry.get("alice", ""),          # what she actually replied
+                "better": entry.get("better", ""),        # what she should have said
+                "emotion": entry.get("emotion", ""),
+            }
+            with open(feedback_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            # Also filed against the turn it judges, so showlog.py can put the verdict next to
+            # the prompt that produced the reply being judged.
+            self.signals.log.record_feedback(
+                entry.get("turn_id"), record["verdict"], record["user"], record["alice"],
+                record["better"], record["emotion"])
+
+            total = sum(1 for _ in open(feedback_path, encoding='utf-8'))
+            label = "OK" if record["verdict"] == "good" else "REWRITE"
+            print(f"FEEDBACK [{label}] {record['alice'][:30]!r}"
+                  + (f" -> {record['better'][:30]!r}" if record['better'] else "")
+                  + f"  (total {total})")
+            await sio.emit('feedback_count', total)
+
+        @sio.event
+        async def get_feedback_count(sid):
+            if not os.path.exists(feedback_path):
+                await sio.emit('feedback_count', 0)
+                return
+            await sio.emit('feedback_count',
+                           sum(1 for _ in open(feedback_path, encoding='utf-8')))
 
         @sio.event
         async def nuke_history(sid):
@@ -228,6 +279,18 @@ class SocketIOServer:
                     # print(f"Sending {event} with {data}")
                     await sio.emit(event, data)
                 await sio.sleep(0.1)
+
+        # Serve the chat page from the server itself so it has a real http:// origin.
+        # Opened straight off disk, the page's origin is "null", and the browser blocks its
+        # socket.io connection -- the window renders but sits on "接続中…" forever.
+        # run_app binds every interface, so this URL also works from a phone on the same Wi-Fi.
+        chat_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chat.html')
+
+        async def chat_page(_request):
+            return web.FileResponse(chat_html)
+
+        app.router.add_get('/', chat_page)
+        app.router.add_get('/chat', chat_page)
 
         async def init_app():
             sio.start_background_task(send_messages)

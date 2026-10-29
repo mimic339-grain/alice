@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>アリス チャット</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  :root{
+    --bg:#11151a; --panel:#171c23; --line:#252c36;
+    --text:#e6ebf0; --muted:#8b97a6;
+    --me:#2a3a4d; --alice:#243a33; --accent:#4fd8c7;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:"Noto Sans JP","Hiragino Sans",sans-serif;
+    height:100vh; display:flex; flex-direction:column;
+  }
+  header{
+    padding:12px 18px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  }
+  h1{ font-size:16px; margin:0; font-weight:600; }
+  .status{ font-size:12px; color:var(--muted); font-family:ui-monospace,monospace; }
+  .dot{ width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:5px; background:#666; }
+  .dot.on{ background:var(--accent); }
+  .state{ font-size:12px; color:var(--accent); font-family:ui-monospace,monospace; min-width:90px; }
+
+  #log{ flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:12px; }
+  .msg{ max-width:min(680px,80%); padding:10px 14px; border-radius:12px; line-height:1.7; white-space:pre-wrap; word-break:break-word; }
+  .msg.me{ align-self:flex-end; background:var(--me); }
+  .msg.alice{ align-self:flex-start; background:var(--alice); }
+  .msg.sys{ align-self:center; background:none; color:var(--muted); font-size:12px; font-family:ui-monospace,monospace; padding:2px; }
+  .who{ font-size:11px; color:var(--muted); margin-bottom:3px; font-family:ui-monospace,monospace; }
+  .emo{ font-size:11px; color:var(--accent); font-family:ui-monospace,monospace; }
+
+  footer{ border-top:1px solid var(--line); padding:12px 18px; display:flex; gap:10px; align-items:flex-end; }
+  textarea{
+    flex:1; background:var(--panel); color:var(--text); border:1px solid var(--line);
+    border-radius:10px; padding:11px 13px; font-family:inherit; font-size:15px;
+    resize:none; min-height:46px; max-height:160px; line-height:1.5;
+  }
+  textarea:focus{ outline:none; border-color:var(--accent); }
+  button{
+    background:var(--accent); color:#0b1210; border:none; border-radius:10px;
+    padding:0 20px; height:46px; font-weight:700; font-size:14px; cursor:pointer;
+    font-family:inherit; white-space:nowrap;
+  }
+  button:disabled{ opacity:.4; cursor:default; }
+  button.ghost{ background:none; color:var(--muted); border:1px solid var(--line); font-weight:500; }
+  .hint{ font-size:11px; color:var(--muted); font-family:ui-monospace,monospace; padding:0 18px 10px; }
+
+  /* feedback controls attached to each of Alice's replies */
+  .fb{ display:flex; gap:7px; margin-top:9px; align-items:center; flex-wrap:wrap; }
+  .fb button{
+    background:none; border:1px solid var(--line); color:var(--muted);
+    height:26px; padding:0 11px; font-size:12px; font-weight:500; border-radius:6px;
+  }
+  .fb button:hover:not(:disabled){ border-color:var(--accent); color:var(--accent); }
+  .fb .done{ font-size:11.5px; color:var(--accent); font-family:ui-monospace,monospace; }
+  .fb .done.rw{ color:#e0a45f; }
+  .rewrite{ display:flex; gap:7px; margin-top:8px; }
+  .rewrite textarea{ flex:1; min-height:38px; max-height:120px; font-size:13.5px; padding:8px 10px; }
+  .rewrite button{ height:38px; align-self:flex-start; }
+  .counter{ font-size:11.5px; color:var(--muted); font-family:ui-monospace,monospace; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>アリス</h1>
+  <span class="status"><span class="dot" id="dot"></span><span id="conn">接続中…</span></span>
+  <span class="state" id="state"></span>
+  <span class="counter" id="fbcount" style="margin-left:auto"></span>
+  <button class="ghost" id="clear" style="height:32px;padding:0 12px;font-size:12px;">履歴リセット</button>
+</header>
+
+<div id="log"></div>
+<div class="hint">Enter で送信 / Shift+Enter で改行</div>
+
+<footer>
+  <textarea id="input" placeholder="アリスに話しかける…" rows="1"></textarea>
+  <button id="send">送信</button>
+</footer>
+
+<script>
+const log = document.getElementById('log');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const dot = document.getElementById('dot');
+const conn = document.getElementById('conn');
+const stateEl = document.getElementById('state');
+
+const socket = io('http://127.0.0.1:8080');
+
+function add(cls, who, text){
+  const el = document.createElement('div');
+  el.className = 'msg ' + cls;
+  if (who) {
+    const w = document.createElement('div');
+    w.className = 'who';
+    w.textContent = who;
+    el.appendChild(w);
+  }
+  el.appendChild(document.createTextNode(text));
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+socket.on('connect', () => {
+  dot.classList.add('on');
+  conn.textContent = '接続済み';
+  add('sys', null, '接続しました');
+});
+socket.on('disconnect', () => {
+  dot.classList.remove('on');
+  conn.textContent = '切断';
+});
+
+// Alice's reply streams in as chunks; keep appending to the same bubble until she stops talking.
+let bubble = null;
+socket.on('next_chunk', (chunk) => {
+  if (typeof chunk !== 'string') return;
+  if (!bubble) bubble = add('alice', 'アリス', '');
+  bubble.appendChild(document.createTextNode(chunk));
+  log.scrollTop = log.scrollHeight;
+});
+socket.on('reset_next_message', () => { bubble = null; });
+
+socket.on('AI_thinking', (v) => { if (v) stateEl.textContent = '考え中…'; });
+socket.on('AI_speaking', (v) => {
+  stateEl.textContent = v ? '発話中' : '';
+  // She has stopped: the reply is complete, so it can be judged as a whole.
+  if (!v && bubble) {
+    attachFeedback(bubble, bubble.textContent.replace(/^アリス/, '').trim());
+    bubble = null;
+  }
+});
+socket.on('current_emotion', (e) => {
+  if (e) { currentEmotion = e; stateEl.textContent += '  [' + e + ']'; }
+});
+
+socket.on('feedback_count', (n) => {
+  document.getElementById('fbcount').textContent = n ? ('学習データ ' + n + '件') : '';
+});
+socket.on('vision_description', (d) => add('sys', null, '👁 画面を見た: ' + d));
+socket.on('action_executed', (a) => add('sys', null, '⚡ ' + a.name));
+
+// Remember what was said to her: a rewrite is only useful as training data next to the line
+// that prompted it, so each record carries the pair.
+let lastUserMessage = '';
+let currentEmotion = '';
+// Set by the server when it starts answering; filed with any feedback on that reply so the
+// verdict lands next to the exact prompt that produced it in logs/conversation.jsonl.
+let currentTurnId = null;
+socket.on('turn_id', (id) => { currentTurnId = id; });
+
+function attachFeedback(bubble, aliceText){
+  const turnId = currentTurnId;   // captured now: the next reply will overwrite the global
+  const row = document.createElement('div');
+  row.className = 'fb';
+
+  const settle = (label, cls) => {
+    row.innerHTML = '';
+    const d = document.createElement('span');
+    d.className = 'done' + (cls ? ' ' + cls : '');
+    d.textContent = label;
+    row.appendChild(d);
+  };
+
+  const ok = document.createElement('button');
+  ok.textContent = 'GOOD これでいい';
+  ok.onclick = () => {
+    socket.emit('feedback', {verdict:'good', user:lastUserMessage,
+                             alice:aliceText, emotion:currentEmotion, turn_id:turnId});
+    settle('記録しました');
+  };
+
+  const no = document.createElement('button');
+  no.textContent = 'こう言ってほしかった';
+  no.onclick = () => {
+    row.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'rewrite';
+    const ta = document.createElement('textarea');
+    ta.placeholder = 'アリスに本当は何と言ってほしかった？';
+    const save = document.createElement('button');
+    save.textContent = '保存';
+    const commit = () => {
+      const better = ta.value.trim();
+      if (!better) return;
+      socket.emit('feedback', {verdict:'rewrite', user:lastUserMessage,
+                               alice:aliceText, better:better, emotion:currentEmotion,
+                               turn_id:turnId});
+      settle('書き直しを記録しました', 'rw');
+    };
+    save.onclick = commit;
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); }
+    });
+    box.appendChild(ta); box.appendChild(save);
+    row.appendChild(box);
+    ta.focus();
+  };
+
+  row.appendChild(ok); row.appendChild(no);
+  bubble.appendChild(row);
+}
+
+function send(){
+  const text = input.value.trim();
+  if (!text) return;
+  add('me', 'あなた', text);
+  lastUserMessage = text;
+  socket.emit('new_topic', text);
+  input.value = '';
+  input.style.height = 'auto';
+  bubble = null;
+}
+
+sendBtn.onclick = send;
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+});
+document.getElementById('clear').onclick = () => {
+  socket.emit('nuke_history');
+  log.innerHTML = '';
+  add('sys', null, '履歴をリセットしました');
+};
+
+socket.emit('get_feedback_count');
+input.focus();
+</script>
+</body>
+</html>

@@ -3,13 +3,14 @@ from constants import PATIENCE
 
 
 class Prompter:
-    def __init__(self, signals, llms, modules=None):
+    def __init__(self, signals, llms, modules=None, reflex=None):
         self.signals = signals
         self.llms = llms
         if modules is None:
             self.modules = {}
         else:
             self.modules = modules
+        self.reflex = reflex
 
         self.system_ready = False
         self.timeSinceLastMessage = 0.0
@@ -27,9 +28,17 @@ class Prompter:
         # Prompt AI if there are unprocessed chat messages
         if len(self.signals.recentTwitchMessages) > 0:
             return True
-        # Prompt if some amount of seconds has passed without anyone talking
-        if self.timeSinceLastMessage > PATIENCE:
+        # Prompt if some amount of seconds has passed without anyone talking.
+        # PATIENCE = 0 disables this: without a human turn in between, the AI would be replying
+        # to her own last line, and each reply becomes the next prompt.
+        if PATIENCE > 0 and self.timeSinceLastMessage > PATIENCE:
             return True
+
+    def last_user_message(self):
+        for message in reversed(self.signals.history):
+            if message["role"] == "user" and message["content"].strip():
+                return message["content"]
+        return ""
 
     def chooseLLM(self):
         if "multimodal" in self.modules and self.modules["multimodal"].API.multimodal_now():
@@ -57,6 +66,10 @@ class Prompter:
             # Decide and prompt LLM
             if self.prompt_now():
                 print("PROMPTING AI")
+                # Fire the short filler first so it reaches the speaker while the main model is
+                # still generating. TTS queues it ahead of the real reply (design doc sec.04.3).
+                if self.reflex is not None and self.signals.new_message:
+                    self.reflex.interject(self.last_user_message())
                 llmWrapper = self.chooseLLM()
                 llmWrapper.prompt()
                 self.signals.last_message_time = time.time()

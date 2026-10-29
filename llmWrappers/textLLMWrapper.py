@@ -15,15 +15,34 @@ class TextLLMWrapper(AbstractLLMWrapper):
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL, token=os.getenv("HF_TOKEN"))
 
     def prepare_payload(self):
+        payload = self._base_payload()
+        # Advertise registered actions as callable tools. Constrained decoding makes the model
+        # actually use them, unlike the prompt-level tag scheme this replaced.
+        action_router = self.modules.get("action")
+        if action_router is not None:
+            tools = action_router.get_tool_specs()
+            if tools:
+                payload["tools"] = tools
+        return payload
+
+    def _base_payload(self):
         return {
             "mode": "instruct",
             "stream": True,
-            "max_tokens": 200,
+            # She is told to answer in 1-2 sentences, and at ~10 tok/s every allowed token is
+            # latency the user waits through. 200 bought nothing but the occasional ramble.
+            "max_tokens": 90,
             "skip_special_tokens": False,  # Necessary for Llama 3
             "custom_token_bans": BANNED_TOKENS,
             "stop": STOP_STRINGS,
-            "messages": [{
-                "role": "user",
-                "content": self.generate_prompt()
-            }]
+            # Without these the model returned the identical sentence for different inputs --
+            # deadly for a VTuber that has to keep talking for a whole stream. Temperature is
+            # held down because the 4-bit Qwen3 starts leaking simplified-Chinese characters
+            # and invented words into its Japanese when sampling gets loose.
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "repetition_penalty": 1.1,
+            # generate_prompt() now returns real system/user/assistant turns rather than one
+            # flat user message -- see AbstractLLMWrapper.generate_prompt for why.
+            "messages": self.generate_prompt()
         }

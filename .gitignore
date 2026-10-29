@@ -9,3 +9,9 @@ realtimesst.log
 vtubeStudio_token.txt
 memories.json
 chroma.db/
+# Runtime state and recordings produced while Alice is running.
+# These are deliberately not committed: this repository is a fork of a public one, so anything
+# here would publish real conversations. They are also regenerated on every run.
+.last_launch.json
+logs/
+feedback.jsonl

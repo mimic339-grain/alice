@@ -1,6 +1,7 @@
 from modules.module import Module
 from constants import *
 from chromadb.config import Settings
+from chromadb.utils import embedding_functions
 import chromadb
 import requests
 import json
@@ -20,8 +21,16 @@ class Memory(Module):
 
         self.processed_count = 0
 
+        # Chroma's default embedding model (all-MiniLM-L6-v2) is English-only, which makes
+        # semantic memory search unreliable for Japanese content. Use a multilingual model instead.
+        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="paraphrase-multilingual-MiniLM-L12-v2"
+        )
+
         self.chroma_client = chromadb.PersistentClient(path="./memories/chroma.db", settings=Settings(anonymized_telemetry=False))
-        self.collection = self.chroma_client.get_or_create_collection(name="neuro_collection")
+        self.collection = self.chroma_client.get_or_create_collection(
+            name="neuro_collection", embedding_function=self.embedding_function
+        )
         print(f"MEMORY: Loaded {self.collection.count()} memories from database.")
         if self.collection.count() == 0:
             print("MEMORY: No memories found in database. Importing from memoryinit.json")
@@ -81,7 +90,7 @@ class Memory(Module):
                     "max_tokens": 200,
                     "skip_special_tokens": False,  # Necessary for Llama 3
                     "custom_token_bans": BANNED_TOKENS,
-                    "stop": STOP_STRINGS.remove("\n"),
+                    "stop": [s for s in STOP_STRINGS if s != "\n"],
                     "messages": [{
                         "role": "user",
                         "content": chat_section + MEMORY_PROMPT
@@ -123,7 +132,7 @@ class Memory(Module):
                 self.outer.collection.delete(id)
 
         def import_json(self, path="./memories/memories.json"):
-            with open(path, "r") as file:
+            with open(path, "r", encoding="utf-8") as file:
                 try:
                     data = json.load(file)
                 except json.JSONDecodeError:
@@ -142,8 +151,8 @@ class Memory(Module):
                                          "document": memories["documents"][i],
                                         "metadata": memories["metadatas"][i]})
 
-            with open(path, "w") as file:
-                json.dump(data, file)
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump(data, file, ensure_ascii=False)
 
         def get_memories(self, query=""):
             data = [];

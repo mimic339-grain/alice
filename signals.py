@@ -1,8 +1,17 @@
 import queue
 
+from conversationLog import ConversationLog
+
 
 class Signals:
     def __init__(self):
+        # Every module can reach the turn log through the signals object it already holds.
+        # The id of the turn currently being answered rides alongside so that whoever receives
+        # the input (chat server, STT), whoever generates the reply (LLM wrapper) and whoever
+        # gets feedback about it later can all file under the same record.
+        self.log = ConversationLog()
+        self.current_turn_id = None
+
         self._human_speaking = False
         self._AI_speaking = False
         self._AI_thinking = False
@@ -12,6 +21,14 @@ class Signals:
         self._stt_ready = False
         self._recentTwitchMessages = []
         self._history = []
+        self._current_emotion = "neutral"
+        # Interjection the reflex model just spoke aloud, waiting to be folded into the main
+        # model's prompt so it doesn't open with a second interjection. Cleared once consumed.
+        self.pending_reflex = None
+        # 0.0-1.0, updated from the TTS audio as it plays, read by the VTube Studio module to
+        # drive the model's mouth. Plain attribute, not a signal property: it changes many times
+        # a second and does not need to notify anyone.
+        self.mouth_openness = 0.0
 
         # This flag indicates to all threads that they should immediately terminate
         self._terminate = False
@@ -56,6 +73,16 @@ class Signals:
             print("SIGNALS: AI Thinking Start")
         else:
             print("SIGNALS: AI Thinking Stop")
+
+    @property
+    def current_emotion(self):
+        return self._current_emotion
+
+    @current_emotion.setter
+    def current_emotion(self, value):
+        self._current_emotion = value
+        self.sio_queue.put(('current_emotion', value))
+        print("SIGNALS: Emotion -> " + value)
 
     @property
     def last_message_time(self):
