@@ -76,6 +76,13 @@ BANNED_PHRASES = [
     "まっててね",
     "待っててね",
     "お仕事中",
+    # Added 2026-11-07 from the user's own notes on six consecutive replies. 「……うん。」 had
+    # become a verbal tic: it closed 4 of 7 replies in one sitting, and the note on it reads
+    # 「この反応が多すぎる」. 「だもの」 came with 「半のおがおかしい」 on a reply that also
+    # invented a League of Legends champion out of nothing.
+    "……うん。",
+    "だもの",
+    "なんだもの",
 ]
 
 

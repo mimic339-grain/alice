@@ -311,8 +311,12 @@ class AbstractLLMWrapper:
     # So the opening chunks are held back only until it is clear whether they are a tag.
     # Waiting for the first complete sentence instead would be simpler and would throw away
     # streaming, which is the only reason chunks are sent at all.
-    EMOTION_TAG_FULL = re.compile(r'^\s*\[(\w+)\]\s*')
-    EMOTION_TAG_PARTIAL = re.compile(r'^\s*(\[\w*)?$')
+    # Deliberately ASCII-only, not \w. \w matches Japanese in Python 3, so 「[ごめん]」 written
+    # by her would be eaten as a tag; a latin bracketed token at the very start of a reply is
+    # only ever an attempt at the emotion tag. Anything in Japanese brackets is left for
+    # strip_stage_directions to deal with.
+    EMOTION_TAG_FULL = re.compile(r'^\s*\[([A-Za-z_][A-Za-z0-9_]*)\]\s*')
+    EMOTION_TAG_PARTIAL = re.compile(r'^\s*(\[[A-Za-z0-9_]*)?$')
 
     def display_chunk(self, chunk):
         """Return the part of this chunk to show, holding back an incomplete emotion tag."""
@@ -324,8 +328,11 @@ class AbstractLLMWrapper:
 
         self._display_pending += chunk
 
+        # No EMOTION_TAGS membership test. A tag she invented is still a tag, and leaving it
+        # in because the name was not on the list is how 「[bai] へえ、バイア？」 reached the
+        # screen and the speaker.
         full = self.EMOTION_TAG_FULL.match(self._display_pending)
-        if full and full.group(1).lower() in EMOTION_TAGS:
+        if full:
             self._display_tag_done = True
             shown = self._display_pending[full.end():]
             self._display_pending = ''
@@ -359,10 +366,18 @@ class AbstractLLMWrapper:
         Runs per sentence rather than per reply so speech can start before generation finishes.
         """
         if is_first:
-            # The emotion tag only ever appears at the very start of the reply.
-            tag_match = re.match(r'^\s*\[(\w+)\]\s*', sentence)
-            if tag_match and tag_match.group(1).lower() in EMOTION_TAGS:
-                self.signals.current_emotion = tag_match.group(1).lower()
+            # The emotion tag only ever appears at the very start of the reply. A tag that is
+            # not one of EMOTION_TAGS is removed all the same: measured, 「[bai] へえ、バイア？」
+            # was voiced with the 「バイ」 read out, because the old test only removed names it
+            # recognised and left anything else sitting in the text as words to say.
+            tag_match = self.EMOTION_TAG_FULL.match(sentence)
+            if tag_match:
+                name = tag_match.group(1).lower()
+                if name in EMOTION_TAGS:
+                    self.signals.current_emotion = name
+                else:
+                    print(f"LLM: discarded an invented emotion tag [{tag_match.group(1)}]")
+                    self.signals.current_emotion = "neutral"
                 sentence = sentence[tag_match.end():]
             else:
                 self.signals.current_emotion = "neutral"

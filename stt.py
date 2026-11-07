@@ -72,6 +72,59 @@ class STT:
             quiet_for = time.time() - self.signals.ai_quiet_since
         return overlapped or quiet_for < STT_ECHO_GUARD_TAIL
 
+    def is_hallucinated(self, text):
+        """False for a transcription Whisper invented out of silence.
+
+        Whisper never returns nothing. Handed a quiet moment it returns the likeliest
+        continuation of silence in its training data, which for Japanese is the end of a video.
+        Measured here verbatim from one quiet moment:
+
+            「それでは、ご視聴頂きまして。 明日もご視聴頂きまして、 ご視聴頂きまして。 ...」
+
+        Filed as a user turn that becomes a sentence nobody said, and she answers it -- the same
+        class of failure as the microphone echo, reached a different way. Two checks, because
+        each catches cases the other misses: a small list of boilerplate nobody here will say,
+        and a loop detector for the general case, since the invented text almost always repeats.
+        """
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        for phrase in STT_HALLUCINATIONS:
+            if phrase in stripped:
+                return True
+
+        # The vocabulary hint, handed straight back as a transcription. faster-whisper's
+        # initial_prompt is prepended as if it were already-decoded text, so on silence the
+        # decoder sometimes just continues it -- measured, verbatim:
+        #
+        #   STT OUTPUT: アリス、マスター、プロンプト、ファインチューニングの話をしています。
+        #
+        # Caught by the echo guard that time only because she happened to be talking. This is a
+        # cost of the hint itself, so it is checked here rather than listed in
+        # STT_HALLUCINATIONS: changing the hint must not require remembering to change a list.
+        hint = re.sub(r'[\s、。,.]', '', STT_INITIAL_PROMPT or '')
+        bare_in = re.sub(r'[\s、。,.]', '', stripped)
+        if hint and len(bare_in) >= 10:
+            for i in range(len(bare_in) - 9):
+                if bare_in[i:i + 10] in hint:
+                    return True
+        parts = [p for p in re.split(r'[。、.,!?！？\s]+', stripped) if p]
+        if len(parts) >= STT_REPEAT_LIMIT:
+            most = max(parts.count(p) for p in set(parts))
+            if most >= STT_REPEAT_LIMIT:
+                return True
+
+        # The same loop with no punctuation to split on: 「うんうんうんうんうん」. Checked over
+        # short units only, and 「うんうん」 stays allowed -- doubling a backchannel is something
+        # a person does, five of them in a row is not. STT_REPEAT_LIMIT sets where that line is.
+        bare = re.sub(r'[\s。、.,!?！？]', '', stripped)
+        for size in (1, 2, 3, 4):
+            if len(bare) >= size * STT_REPEAT_LIMIT and len(bare) % size == 0:
+                unit = bare[:size]
+                if unit * (len(bare) // size) == bare:
+                    return True
+        return False
+
     def process_text(self, text):
         # Consumed first, unconditionally: is_echo() pops the snapshot queue, so returning
         # early without calling it would leave every later transcription paired with the wrong
@@ -83,6 +136,11 @@ class STT:
 
         if not self.is_meaningful(text):
             print(f"STT IGNORED (too short to be speech): {text!r}")
+            return
+
+        if self.is_hallucinated(text):
+            print(f"STT IGNORED (Whisper invented this out of silence): {text!r}")
+            self.signals.sio_queue.put(("heard_dropped", text))
             return
 
         print("STT OUTPUT: " + text)
@@ -174,6 +232,9 @@ class STT:
             'model': 'small',
             'realtime_model_type': 'tiny',
             'compute_type': 'auto',
+            # Biases the decoder toward the words actually used in this room. Whisper returned
+            # 「弦を上げて」 for 「ゲインを上げて」 -- a valid sentence and the wrong one.
+            'initial_prompt': STT_INITIAL_PROMPT,
             # Keep STT off the GPU so the full 6GB stays available for the LLM (see tech comparison doc, sec.04).
             'device': 'cpu',
             'on_recording_start': self.recording_start,
