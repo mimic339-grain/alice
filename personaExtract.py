@@ -303,7 +303,15 @@ def analyse_feedback(corpus):
     This is the highest-value signal in the whole file and the scarcest: a rewrite is the one
     place where the target is stated rather than inferred.
     """
-    out = {"good": 0, "rewrite": 0, "with_why": 0, "test_looking": 0, "pairs": []}
+    out = {"good": 0, "rewrite": 0, "with_why": 0, "test_looking": 0, "pairs": [],
+           # Records that say WHY a reply was wrong without supplying a replacement line.
+           # Kept separate from pairs on purpose: they carry no target text, so none of the
+           # length/politeness arithmetic below applies -- but they are the only place a RULE
+           # is stated rather than inferred from a single example, which makes them the more
+           # directly actionable of the two. Before 'ここがおかしい（理由だけ）' became its own
+           # button in the chat window there were zero of these, and they were dropped here
+           # without a word: counted in with_why, then skipped because `better` was empty.
+           "notes": []}
     for f in corpus.feedback:
         verdict = f.get("verdict")
         out["good" if verdict == "good" else "rewrite"] += 1
@@ -317,7 +325,12 @@ def analyse_feedback(corpus):
         if "テスト" in user or "テスト" in alice:
             out["test_looking"] += 1
             continue
-        if verdict != "rewrite" or not better:
+        if verdict != "rewrite":
+            continue
+        why = (f.get("why") or "").strip()
+        if not better:
+            if why:
+                out["notes"].append({"user": user, "alice": alice, "why": why})
             continue
 
         out["pairs"].append({
@@ -528,6 +541,14 @@ def report(corpus, a, fb, top, samples):
             for kind, text, why in fb["conflicts"]:
                 print(f"    {kind}: 「{text[:50]}」")
                 print(f"        → {why}")
+
+    if fb["notes"]:
+        print(f"\n  指摘 {len(fb['notes'])}件（書き直し文なし、理由だけ）")
+        print("    ここに書かれているのは規則です。1件の例ではなく、プロンプトに書ける形に近い。")
+        for n in fb["notes"]:
+            print(f"\n    入力  : {n['user'][:50]}")
+            print(f"    言った: {n['alice'][:60]}")
+            print(f"    指摘  : {n['why'][:120]}")
 
     # ---- D. 提案 ---------------------------------------------------------------------------
     print("\n" + line)

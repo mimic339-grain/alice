@@ -204,18 +204,23 @@ function attachFeedback(bubble, aliceText){
     settle('記録しました');
   };
 
-  const no = document.createElement('button');
-  no.textContent = 'こう言ってほしかった';
-  no.onclick = () => {
+  // Two separate things, and they answer different questions. "What is wrong" names the rule
+  // she broke, which is what can be turned into a persona fix; "what she should have said"
+  // gives a target line, which is what becomes training data.
+  //
+  // Both boxes used to live behind one button labelled 'こう言ってほしかった'. Nothing about
+  // that label suggests a reason can be written without supplying a replacement line, and the
+  // result was measurable: across every rewrite in the log, `why` was filled in ZERO times, so
+  // personaExtract.py could only ever report "this reply was wrong" and never "this rule broke".
+  // Writing a reason is now its own button, because it is the more useful of the two and the
+  // easier one to answer.
+  const openNote = (wantBetter) => {
     row.innerHTML = '';
     const box = document.createElement('div');
     box.className = 'rewrite';
 
-    // Two separate things. "What is wrong" names the rule she broke, which is what gets
-    // turned into a persona fix; "what she should have said" gives the target line, which is
-    // what becomes training data. Filling in either one is enough.
     const why = document.createElement('textarea');
-    why.placeholder = 'どこがおかしい？（例: 怒る理由がないのに怒ってる／丁寧すぎる）';
+    why.placeholder = 'どこがおかしい？（例: 怒る理由がないのに怒ってる／丁寧すぎる／聞かれてないことに答えてる）';
     why.rows = 2;
     const better = document.createElement('textarea');
     better.placeholder = '本当は何と言ってほしかった？（分かれば）';
@@ -224,24 +229,38 @@ function attachFeedback(bubble, aliceText){
     const save = document.createElement('button');
     save.textContent = '保存';
     const commit = () => {
-      const w = why.value.trim(), b = better.value.trim();
+      const w = why.value.trim(), b = wantBetter ? better.value.trim() : '';
       if (!w && !b) return;
       socket.emit('feedback', {verdict:'rewrite', user:lastUserMessage,
                                alice:aliceText, better:b, why:w,
                                emotion:currentEmotion, turn_id:turnId});
-      settle(w && b ? '理由と書き直しを記録しました' : '記録しました', 'rw');
+      settle(w && b ? '理由と書き直しを記録しました'
+                    : (w ? '理由を記録しました' : '記録しました'), 'rw');
     };
     save.onclick = commit;
-    [why, better].forEach(t => t.addEventListener('keydown', (e) => {
+    const boxes = wantBetter ? [why, better] : [why];
+    boxes.forEach(t => t.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); }
     }));
 
-    box.appendChild(why); box.appendChild(better); box.appendChild(save);
+    box.appendChild(why);
+    if (wantBetter) box.appendChild(better);
+    box.appendChild(save);
     row.appendChild(box);
     why.focus();
   };
 
-  row.appendChild(ok); row.appendChild(no);
+  // Reason only. The fast path: it needs no replacement line, and it is what turns one bad
+  // reply into a rule.
+  const bad = document.createElement('button');
+  bad.textContent = 'ここがおかしい（理由だけ）';
+  bad.onclick = () => openNote(false);
+
+  const no = document.createElement('button');
+  no.textContent = 'こう言ってほしかった';
+  no.onclick = () => openNote(true);
+
+  row.appendChild(ok); row.appendChild(bad); row.appendChild(no);
   bubble.appendChild(row);
 }
 
