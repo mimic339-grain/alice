@@ -133,8 +133,15 @@ async def main():
     # she would say "起動。" and finish the sentence fifteen seconds later. Warming first costs
     # a few seconds of silence at startup, which reads as an application loading, and then the
     # whole greeting lands together.
+    # The voice warms itself on its own thread (tts.py), so the two warm-ups overlap. Waiting
+    # on tts_ready here only matters when the voice is the slower of the two: the greeting's
+    # first phrase is fixed and spoken immediately, so without this it would be the line that
+    # pays the voice model's one-time load.
     def warm_then_greet():
         llms["text"].warm_up()
+        deadline = time.time() + 60
+        while not signals.tts_ready and time.time() < deadline:
+            time.sleep(0.2)
         greet(signals, tts, llm=llms["text"])
 
     threading.Thread(target=warm_then_greet, daemon=True).start()

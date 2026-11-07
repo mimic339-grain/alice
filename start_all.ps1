@@ -1,6 +1,6 @@
 # Starts every backend service this project needs, each in its own window.
 #
-#   1. VOICEVOX        - TTS engine           (http://127.0.0.1:50021)
+#   1. AivisSpeech     - TTS engine           (http://127.0.0.1:10101)
 #   2. Main LLM        - Qwen3-8B on GPU      (http://127.0.0.1:5000)
 #   3. Reflex LLM      - Qwen3-0.6B on CPU    (http://127.0.0.1:5001)  [off by default]
 #   4. Vision LLM      - Qwen3-VL-2B on CPU   (http://127.0.0.1:5002)
@@ -27,20 +27,47 @@ if ($stale) {
     Start-Sleep -Seconds 2
 }
 
-$textgen  = "$env:USERPROFILE\source\repos\textgen\textgen-4.9"
-$voicevox = "$env:LOCALAPPDATA\Programs\VOICEVOX\VOICEVOX.exe"
+$textgen = "$env:USERPROFILE\source\repos\textgen\textgen-4.9"
+$aivis   = "$env:LOCALAPPDATA\Programs\AivisSpeech-Engine\Windows-x64\run.exe"
 
 function Test-Port($port) {
     $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
     return $null -ne $c
 }
 
-# --- VOICEVOX ---
-if (Test-Port 50021) {
-    Write-Host "VOICEVOX already running on 50021" -ForegroundColor DarkGray
+# --- AivisSpeech ---
+#
+# The engine's executable is called run.exe, and so is VOICEVOX's, so it is matched on the
+# full command line. Never match on the image name: killing every run.exe would take out any
+# other engine the user has open.
+#
+# A previous engine that did not shut down cleanly keeps the port bound without serving, and
+# the new one then exits immediately with nothing on screen to say why. If nothing is
+# listening on 10101 but an engine process is alive, it is that case -- clear it first. This
+# is the same failure that cost an afternoon with VOICEVOX.
+if (-not (Test-Port 10101)) {
+    $orphans = Get-CimInstance Win32_Process -Filter "Name = 'run.exe'" |
+        Where-Object { $_.CommandLine -match 'AivisSpeech' }
+    if ($orphans) {
+        Write-Host "Clearing $($orphans.Count) stale AivisSpeech engine process(es)..." -ForegroundColor Yellow
+        foreach ($p in $orphans) {
+            Write-Host "  PID $($p.ProcessId)" -ForegroundColor DarkGray
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 2
+    }
+}
+
+if (Test-Port 10101) {
+    Write-Host "AivisSpeech already running on 10101" -ForegroundColor DarkGray
+} elseif (-not (Test-Path $aivis)) {
+    Write-Host "AivisSpeech Engine not found at $aivis" -ForegroundColor Red
+    Write-Host "  Get it from https://github.com/Aivis-Project/AivisSpeech-Engine/releases" -ForegroundColor DarkGray
+    Write-Host "  and put voice models (.aivmx) in $env:APPDATA\AivisSpeech-Engine\Models" -ForegroundColor DarkGray
 } else {
-    Write-Host "Starting VOICEVOX..." -ForegroundColor Cyan
-    Start-Process -FilePath $voicevox
+    Write-Host "Starting AivisSpeech Engine..." -ForegroundColor Cyan
+    Start-Process -FilePath $aivis -ArgumentList "--host 127.0.0.1 --port 10101" `
+                  -WorkingDirectory (Split-Path $aivis)
 }
 
 # --- Main LLM (GPU) ---
@@ -80,7 +107,7 @@ if ($StartVisionLLM) {
 
 Write-Host ""
 Write-Host "Waiting for services to come up..." -ForegroundColor Cyan
-$ports = @(50021, 5000)
+$ports = @(10101, 5000)
 if ($StartReflexLLM) { $ports += 5001 }
 if ($StartVisionLLM) { $ports += 5002 }
 foreach ($p in $ports) {

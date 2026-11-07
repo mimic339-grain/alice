@@ -7,12 +7,14 @@ gap reads as a hang, so a small CPU-resident model fills it in a few hundred mil
 its own endpoint so it never competes with the main model for VRAM.
 """
 
+import collections
 import random
 import re
 import requests
 
-from constants import (REFLEX_ENDPOINT, REFLEX_FALLBACKS, REFLEX_MAX_CHARS, REFLEX_MAX_TOKENS,
-                       REFLEX_PROMPT, REFLEX_TIMEOUT, REFLEX_USE_LLM)
+from constants import (REFLEX_AVOID_RECENT, REFLEX_EMOTIONS, REFLEX_ENDPOINT, REFLEX_FALLBACKS,
+                       REFLEX_MAX_CHARS, REFLEX_MAX_TOKENS, REFLEX_PROBABILITY, REFLEX_PROMPT,
+                       REFLEX_TIMEOUT, REFLEX_USE_LLM)
 
 
 class ReflexLLM:
@@ -21,7 +23,10 @@ class ReflexLLM:
         self.tts = tts
         self.enabled = True
         self.headers = {"Content-Type": "application/json"}
-        self.last_phrase = None
+        # A window rather than just the previous phrase. One-step memory still let the pool
+        # cycle audibly -- "へぇ〜 / なるほどね / へぇ〜" passes a last-phrase check and is
+        # exactly what made the old version sound like a tic.
+        self.recent = collections.deque(maxlen=max(1, REFLEX_AVOID_RECENT))
 
     def _clean(self, text):
         # The reflex model sometimes wraps its interjection in quotes or adds a trailing
@@ -42,6 +47,11 @@ class ReflexLLM:
     def interject(self, user_message):
         """Speak a short filler immediately. Returns the phrase spoken, or None."""
         if not self.enabled:
+            return None
+
+        # Not on every message. An interjection that always arrives stops being a reaction and
+        # becomes a verbal tic, which is what this sounded like before it was switched off.
+        if random.random() > REFLEX_PROBABILITY:
             return None
 
         phrase = ""
@@ -73,17 +83,27 @@ class ReflexLLM:
         if not self._is_valid_interjection(phrase):
             # Model produced a sentence rather than an interjection. The filler exists purely for
             # tempo, so a canned phrase serves the same purpose without the model's mistakes.
-            phrase = random.choice([p for p in REFLEX_FALLBACKS if p != self.last_phrase])
+            fresh = [p for p in REFLEX_FALLBACKS if p not in self.recent]
+            # With a pool smaller than the window this would eventually empty; fall back to the
+            # whole list rather than going silent.
+            phrase = random.choice(fresh or REFLEX_FALLBACKS)
 
-        # Hearing the identical filler twice running is more jarring than a plain pause.
-        if phrase == self.last_phrase:
-            print("REFLEX: skipped (repeat of last phrase)")
+        if phrase in self.recent:
+            print(f"REFLEX: skipped ({phrase!r} said recently)")
             return None
-        self.last_phrase = phrase
+        self.recent.append(phrase)
 
-        print("REFLEX OUTPUT: " + phrase)
+        # A different emotion each time changes speed, expressiveness and tempo variation in
+        # ttsEngine, so repeats of the same word are not acoustically identical either. Passed
+        # to play() rather than written into signals, which would hand it to the real reply too.
+        emotion = random.choice(REFLEX_EMOTIONS)
+
+        print(f"REFLEX OUTPUT [{emotion}]: {phrase}")
         self.signals.pending_reflex = phrase
-        self.tts.play(phrase)
+        # Also shown in the chat window. Previously the interjection existed only as sound, so
+        # the AI appeared to blurt a word with no text to match it.
+        self.signals.sio_queue.put(("next_chunk", phrase))
+        self.tts.play(phrase, emotion=emotion)
         return phrase
 
     class API:

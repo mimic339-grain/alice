@@ -15,3 +15,8 @@ chroma.db/
 .last_launch.json
 logs/
 feedback.jsonl
+
+# Generated fine-tuning data. Built from logs/conversation.jsonl and feedback.jsonl, so every
+# row contains something actually said in this room -- it must stay out of a public fork for
+# the same reason those two files do.
+data/

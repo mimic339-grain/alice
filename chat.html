@@ -60,9 +60,9 @@
   .fb button:hover:not(:disabled){ border-color:var(--accent); color:var(--accent); }
   .fb .done{ font-size:11.5px; color:var(--accent); font-family:ui-monospace,monospace; }
   .fb .done.rw{ color:#e0a45f; }
-  .rewrite{ display:flex; gap:7px; margin-top:8px; }
-  .rewrite textarea{ flex:1; min-height:38px; max-height:120px; font-size:13.5px; padding:8px 10px; }
-  .rewrite button{ height:38px; align-self:flex-start; }
+  .rewrite{ display:flex; flex-direction:column; gap:7px; margin-top:8px; }
+  .rewrite textarea{ min-height:44px; max-height:120px; font-size:13.5px; padding:8px 10px; }
+  .rewrite button{ height:36px; align-self:flex-start; padding:0 18px; }
   .counter{ font-size:11.5px; color:var(--muted); font-family:ui-monospace,monospace; }
 </style>
 </head>
@@ -77,7 +77,7 @@
 </header>
 
 <div id="log"></div>
-<div class="hint">Enter で送信 / Shift+Enter で改行</div>
+<div class="hint">Enter で送信 / Shift+Enter で改行 ・ フィードバックの保存は Ctrl+Enter</div>
 
 <footer>
   <textarea id="input" placeholder="アリスに話しかける…" rows="1"></textarea>
@@ -184,25 +184,35 @@ function attachFeedback(bubble, aliceText){
     row.innerHTML = '';
     const box = document.createElement('div');
     box.className = 'rewrite';
-    const ta = document.createElement('textarea');
-    ta.placeholder = 'アリスに本当は何と言ってほしかった？';
+
+    // Two separate things. "What is wrong" names the rule she broke, which is what gets
+    // turned into a persona fix; "what she should have said" gives the target line, which is
+    // what becomes training data. Filling in either one is enough.
+    const why = document.createElement('textarea');
+    why.placeholder = 'どこがおかしい？（例: 怒る理由がないのに怒ってる／丁寧すぎる）';
+    why.rows = 2;
+    const better = document.createElement('textarea');
+    better.placeholder = '本当は何と言ってほしかった？（分かれば）';
+    better.rows = 2;
+
     const save = document.createElement('button');
     save.textContent = '保存';
     const commit = () => {
-      const better = ta.value.trim();
-      if (!better) return;
+      const w = why.value.trim(), b = better.value.trim();
+      if (!w && !b) return;
       socket.emit('feedback', {verdict:'rewrite', user:lastUserMessage,
-                               alice:aliceText, better:better, emotion:currentEmotion,
-                               turn_id:turnId});
-      settle('書き直しを記録しました', 'rw');
+                               alice:aliceText, better:b, why:w,
+                               emotion:currentEmotion, turn_id:turnId});
+      settle(w && b ? '理由と書き直しを記録しました' : '記録しました', 'rw');
     };
     save.onclick = commit;
-    ta.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); }
-    });
-    box.appendChild(ta); box.appendChild(save);
+    [why, better].forEach(t => t.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); }
+    }));
+
+    box.appendChild(why); box.appendChild(better); box.appendChild(save);
     row.appendChild(box);
-    ta.focus();
+    why.focus();
   };
 
   row.appendChild(ok); row.appendChild(no);

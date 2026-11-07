@@ -1,11 +1,3 @@
 {
-  "memories": [
-    {
-      "id": "example",
-      "document": "これは長期記憶の例です。実際の内容に書き換えるか、空のまま運用してAIに自動生成させてください。",
-      "metadata": {
-        "type": "long-term"
-      }
-    }
-  ]
+  "memories": []
 }

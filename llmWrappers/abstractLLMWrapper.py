@@ -1,3 +1,4 @@
+import collections
 import copy
 import re
 import requests
@@ -23,6 +24,12 @@ class AbstractLLMWrapper:
             self.modules = modules
 
         self.headers = {"Content-Type": "application/json"}
+
+        # Sentences she has actually spoken recently, newest last. Shown back to her in the
+        # volatile slot so "don't repeat yourself" has something concrete to refer to. Kept
+        # here rather than read out of history because history gets trimmed, which is precisely
+        # how the same line came back five times.
+        self._recent_lines = collections.deque(maxlen=max(1, RECENT_LINES_REMEMBERED))
 
         load_dotenv()
 
@@ -98,10 +105,35 @@ class AbstractLLMWrapper:
         self._last_context = context.strip()
         self._last_trimmed = 0
 
+        # Show her what she has said lately, so she can avoid saying it again.
+        #
+        # The prompt already asks for 毎回ちがう言い回し and it is not enough: personaExtract.py
+        # measured ten sentences repeated verbatim, 「また何かあるの」 five times. The instruction
+        # has nothing to compare against -- trimming drops the older turns that contained the
+        # repeat, so by the time she says it the fifth time the first four are gone from the
+        # prompt entirely. Listing them explicitly gives the rule something to act on.
+        recent = ""
+        if RECENT_LINES_SHOWN > 0 and self._recent_lines:
+            lines = list(self._recent_lines)[-RECENT_LINES_SHOWN:]
+            recent = ("（最近これを言った。同じ言い方はしないこと）\n"
+                      + "\n".join(f"- {line}" for line in lines) + "\n")
+
+        # Restate the rules that drift. A system prompt's influence fades as the history grows,
+        # and the measured symptom here is her sliding into polite-assistant speech several
+        # exchanges in. Counted in her own turns, so it tracks conversation length rather than
+        # wall-clock time, and placed in the volatile slot below so the cached prefix survives.
+        reminder = ""
+        if PERSONA_REMINDER_EVERY > 0:
+            replies = sum(1 for m in history if m["role"] == "assistant")
+            if replies and replies % PERSONA_REMINDER_EVERY == 0:
+                reminder = PERSONA_REMINDER.strip() + "\n"
+                print(f"PROMPT: persona reminder re-injected (reply {replies})")
+
         # /no_think disables Qwen3's chain-of-thought mode, which otherwise spends max_tokens on
         # internal reasoning before the one-line reply -- fatal for conversational tempo.
         # Harmless on models without a thinking mode.
-        trailing = (context.strip() + "\n" if context.strip() else "") + "/no_think"
+        trailing = (recent + reminder
+                    + (context.strip() + "\n" if context.strip() else "") + "/no_think")
         if messages[-1]["role"] == "user":
             messages[-1] = {"role": "user",
                             "content": messages[-1]["content"] + "\n" + trailing}
@@ -250,6 +282,21 @@ class AbstractLLMWrapper:
             return stripped
         return text
 
+    # Bracketed stage directions: 「大丈夫...（怯え）...大丈夫」.
+    #
+    # The prompt forbids these because the voice reads the bracket contents aloud -- 「（怯え）」
+    # comes out as "オビエ", measured in VOICEVOX. But personaExtract.py found the user writing
+    # exactly this in a rewrite, so the ban is arguing with what was actually asked for.
+    # Both can hold: keep the brackets in the text that is displayed and logged, and remove
+    # them from the string handed to the voice. The prompt rule becomes advice rather than a
+    # requirement, and when she writes one anyway nothing breaks.
+    STAGE_DIRECTION = re.compile(r'[（(][^）)]{1,30}[）)]')
+
+    @classmethod
+    def strip_stage_directions(cls, text):
+        """Remove bracketed acting notes. For the voice only -- never for what is shown."""
+        return cls.STAGE_DIRECTION.sub('', text or '').strip()
+
     def clean_sentence(self, sentence, is_first, reflex_spoken):
         """Apply every text fix-up to one sentence, in the order they must happen.
 
@@ -295,8 +342,20 @@ class AbstractLLMWrapper:
             log.record_sentence(turn_id, raw, "", filtered="safety filter")
             return ""
 
-        log.record_sentence(turn_id, raw, sentence)
-        self.tts.play(sentence)
+        # What is voiced and what is shown differ only here, and only for stage directions.
+        voiced = self.strip_stage_directions(sentence)
+        if not voiced:
+            # The whole sentence was a stage direction. Show it, say nothing.
+            log.record_sentence(turn_id, raw, "", filtered="stage direction only")
+            self.signals.sio_queue.put(("next_chunk", sentence))
+            return sentence
+
+        log.record_sentence(turn_id, raw, voiced)
+        # Remembered as displayed, brackets and all: that is the wording to avoid repeating.
+        self._recent_lines.append(sentence)
+        self.tts.play(voiced)
+        # The displayed text keeps the brackets; the returned value is what goes into history
+        # and the chat window, so she stays in character on screen.
         return sentence
 
     def stream_reply(self, data, reflex_spoken, is_first):

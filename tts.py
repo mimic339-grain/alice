@@ -5,7 +5,7 @@ import time
 import numpy as np
 from RealtimeTTS import TextToAudioStream
 
-from voicevoxEngine import VoicevoxEngine, VoicevoxVoice
+from ttsEngine import SynthEngine, SynthVoice
 from constants import *
 
 
@@ -16,16 +16,22 @@ class TTS:
         self.API = self.API(self)
         self.enabled = True
 
-        # Requires VOICEVOX Engine to be running locally (default port 50021)
-        engine = VoicevoxEngine(
-            voice=VoicevoxVoice(speaker_id=VOICEVOX_SPEAKER_ID, speed_scale=VOICEVOX_SPEED),
+        # Requires a VOICEVOX-compatible engine to be running locally. AivisSpeech Engine on
+        # port 10101 by default; see the VOICE block in constants.py.
+        self.engine = SynthEngine(
+            base_url=TTS_BASE_URL,
+            voice=SynthVoice(speaker_id=TTS_SPEAKER_ID, speed=TTS_SPEED,
+                             intonation=TTS_INTONATION,
+                             tempo_dynamics=TTS_TEMPO_DYNAMICS),
+            emotion_voice=TTS_EMOTION_VOICE,
+            emotion_styles=TTS_EMOTION_STYLES,
         )
         tts_config = {
             'on_audio_stream_start': self.audio_started,
             'on_audio_stream_stop': self.audio_ended,
             'output_device_index': OUTPUT_DEVICE_INDEX,
         }
-        self.stream = TextToAudioStream(engine, **tts_config)
+        self.stream = TextToAudioStream(self.engine, **tts_config)
 
         # Sentences wait here and a single worker speaks them one at a time.
         #
@@ -42,6 +48,16 @@ class TTS:
         self.play_thread = threading.Thread(target=self.play_loop, daemon=True)
         self.play_thread.start()
 
+        # Style-Bert-VITS2 models are loaded into memory on first use, which takes about seven
+        # seconds; afterwards a sentence synthesizes in well under one. Off the main thread so
+        # boot is not blocked, and before tts_ready so the greeting does not land in the middle
+        # of it -- the greeting is the first thing she says, and it is the worst thing to delay.
+        threading.Thread(target=self._warm_up, daemon=True).start()
+
+    def _warm_up(self):
+        start = time.time()
+        if self.engine.warm_up():
+            print(f"TTS Ready (voice warmed in {time.time() - start:.1f}s)")
         self.signals.tts_ready = True
 
     def on_audio_chunk(self, chunk):
@@ -64,8 +80,13 @@ class TTS:
             # Lip sync is cosmetic; never let it interfere with speech.
             pass
 
-    def play(self, message):
-        """Queue one sentence to be spoken. Returns immediately."""
+    def play(self, message, emotion=None):
+        """Queue one sentence to be spoken. Returns immediately.
+
+        emotion overrides the current one for this sentence only. The reflex interjections use
+        it: they are spoken before the reply they precede has an emotion of its own, and writing
+        one into signals would hand it to that reply as well.
+        """
         if not self.enabled:
             return
 
@@ -76,14 +97,19 @@ class TTS:
         self.signals.sio_queue.put(("current_message", message))
         # Held here rather than fed to the stream now: see the note in __init__ for why the
         # stream is only ever given one sentence at a time.
+        #
+        # The emotion is captured now, not read in the worker. A reply's sentences are queued
+        # as they are generated while the previous one is still being spoken, so by the time
+        # the worker reaches a sentence the next reply may already have overwritten
+        # current_emotion -- and the line would be spoken in the mood of the one after it.
         self.signals.AI_speaking = True
-        self.pending.put(message)
+        self.pending.put((message, emotion or self.signals.current_emotion))
 
     def play_loop(self):
         """Speak queued sentences in order, one playback session each."""
         while not self.signals.terminate:
             try:
-                message = self.pending.get(timeout=0.2)
+                message, emotion = self.pending.get(timeout=0.2)
             except queue.Empty:
                 continue
 
@@ -91,6 +117,9 @@ class TTS:
                 continue
 
             try:
+                # Set before feed: the engine reads it when the sentence is synthesized, which
+                # happens inside play(), so it has to be in place first.
+                self.engine.set_emotion(emotion)
                 self.stream.feed(message)
                 # Synchronous: returns once this sentence has actually been spoken, which is
                 # what makes the next feed safe. on_audio_chunk belongs to the play call rather
@@ -98,7 +127,7 @@ class TTS:
                 self.stream.play(on_audio_chunk=self.on_audio_chunk)
                 # Logged after the fact, so this line means "was said out loud", not "was
                 # queued". That distinction is what made the dropped-sentence bug hard to see.
-                print(f"SPOKE: {message}")
+                print(f"SPOKE [{emotion}]: {message}")
             except Exception as e:
                 # One sentence failing to synthesize must not take the whole voice down.
                 print(f"TTS: failed to speak {message[:30]!r}: {type(e).__name__}: {e}")

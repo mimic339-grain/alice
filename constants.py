@@ -46,12 +46,30 @@ LLM_ENDPOINT = "http://127.0.0.1:5000"
 # REFLEX LLM SECTION: the small model that fills the gap while the main model thinks.
 # Runs as a second textgen instance on its own port (see start_all.ps1).
 #
-# Off. It spoke a canned "へぇ〜" / "なるほどね" the instant a message arrived, before the real
-# reply existed, and it did so only through the speakers -- the interjection never appeared in
-# the chat window. So the AI blurted a word nobody had asked for, out of nowhere and with no
-# text to match it, and only then answered. It was there to cover a 16-second wait that no
-# longer exists: replies now start in about 2.6 seconds, which needs no covering.
-REFLEX_ENABLED = False
+# Back on, with the thing that was actually wrong fixed.
+#
+# It was turned off because it spoke a canned "へぇ〜" / "なるほどね" on EVERY message, from a
+# list of eight, so the same few words came round again and again, and it covered a 16-second
+# wait that no longer exists.
+#
+# But the concept was not the problem. Work on conversational agents finds that varying the
+# backchannel improves perceived naturalness over repeating an identical one (arXiv 2205.00755),
+# and that agents built from spontaneous speech draw more backchannels from people and are rated
+# closer to human conversation. The same literature is clear about the limits: in task-oriented
+# talk, filler-using agents were rated LESS intelligent and less likable, with no gain in
+# human-likeness -- but more entertaining in social conversation, which is what this is.
+#
+# So: a much larger pool, never reuse anything said recently, don't fire every turn, and vary
+# the voice parameters per interjection so two "へぇ〜"s do not sound identical either.
+REFLEX_ENABLED = True
+
+# How often an arriving message gets an interjection at all. Firing every time is what made it
+# feel mechanical; a filler that is not always there reads as a reaction rather than a tic.
+REFLEX_PROBABILITY = 0.4
+
+# Never say any of the last N interjections again. Hearing the same filler twice in a short
+# stretch is worse than hearing none.
+REFLEX_AVOID_RECENT = 8
 # Whether to ask the 0.6B model for the interjection, or just pick one from REFLEX_FALLBACKS.
 #
 # Measured on this machine, the model path lost on every axis: 233-448ms instead of 0ms, it
@@ -72,7 +90,28 @@ REFLEX_PROMPT = '''あなたは相槌だけを返します。「へぇ〜」「�
 # A 0.6B model regularly ignores the instruction above and returns polite sentences like
 # 「そうしました！」. Anything that isn't a short kana-only interjection is discarded and one of
 # these is spoken instead, so the filler is always in character.
-REFLEX_FALLBACKS = ["へぇ〜", "ほほう", "えっ", "なるほどね", "おお", "うんうん", "まじで", "そっかぁ"]
+#
+# Deliberately long. With eight entries and REFLEX_AVOID_RECENT at 8 there would be nothing
+# left to choose from, and more importantly the previous version's failure was audible
+# repetition -- the pool has to be big enough that a listener does not learn it.
+REFLEX_FALLBACKS = [
+    # plain acknowledgement
+    "うん", "うんうん", "ふんふん", "そっか", "そっかぁ", "なるほど", "なるほどね", "へぇ",
+    "へぇ〜", "ほほう", "ふーん", "おお", "おー", "はいはい",
+    # surprise
+    "えっ", "えー", "ええっ", "うわ", "うわぁ", "まじで", "まじか", "ほんと", "ほんとに",
+    "うそ", "ちょっと",
+    # thinking
+    "んー", "う〜ん", "えーと", "どれどれ", "ふむ",
+    # being called / prompted
+    "ん", "ん？", "なに", "はーい", "よんだ",
+]
+
+# Emotions an interjection may be spoken with. The tag reaches ttsEngine through tts.play and
+# changes speed, expressiveness and tempo variation, so the same word comes out differently --
+# which is the acoustic variety the naturalness result above actually depends on.
+REFLEX_EMOTIONS = ["neutral", "neutral", "happy", "surprised", "excited", "sleepy"]
+
 # Max length of an acceptable model-generated interjection.
 REFLEX_MAX_CHARS = 6
 
@@ -83,19 +122,74 @@ TWITCH_MAX_MESSAGE_LENGTH = 300
 #UNIQUE#
 TWITCH_CHANNEL = "lunasparkai"
 
-# Voice reference file for TTS (unused now that TTS runs on VOICEVOX, kept for reference)
+# Voice reference file for TTS (unused now that TTS runs on a VOICEVOX-compatible engine)
 #UNIQUE#
 VOICE_REFERENCE = "neuro.wav"
 
-# VOICEVOX speaker/style ID to use. Run VOICEVOX Engine and GET /speakers to see the full list.
-# 3 = Zundamon (Normal) in the default VOICEVOX speaker set. Placeholder until the commissioned
-# voice is ready -- the character's real voice is planned as Style-Bert-VITS2 -> AivisSpeech,
-# which speaks the same HTTP API, so this stays a one-line change.
-VOICEVOX_SPEAKER_ID = 3
+# ---- VOICE -------------------------------------------------------------------------------
+#
+# The voice runs on AivisSpeech Engine, not VOICEVOX. Both speak the same HTTP API, so
+# ttsEngine.py serves either; only this block changes between them.
+#
+# Why AivisSpeech: its voices are Style-Bert-VITS2 (JP-Extra), the same family Shizuku's V2.0
+# voice is built on, and it loads them from a folder of .aivmx files. That makes a voice of
+# our own later an extra file in that folder rather than a new engine. VOICEVOX cannot do that
+# at all -- its voices are fixed.
+#
+# The engine must be running before main.py starts (start_all.ps1 does it):
+#   %LOCALAPPDATA%\Programs\AivisSpeech-Engine\Windows-x64\run.exe --port 10101
+# Voice models live in %APPDATA%\AivisSpeech-Engine\Models as .aivmx files.
+# GET http://127.0.0.1:10101/speakers lists the style ids that are actually installed.
+TTS_BASE_URL = "http://127.0.0.1:10101"
 
-# Speaking rate. VOICEVOX's 1.0 default is noticeably slower than natural conversation, which
-# makes the AI feel sluggish on top of the generation delay. Raise for snappier delivery.
-VOICEVOX_SPEED = 1.35
+# Style id, from /speakers. These are not small sequential numbers like VOICEVOX's: AivisSpeech
+# derives them from an MD5 of the speaker UUID, so they must be read from the running engine
+# rather than guessed, and they change if the model is replaced.
+#
+#   1948846464  AI Maid K1-3486  (ノーマル)   -- in use
+#   1406575360  AI Maid K2-3481  (ノーマル)
+#    888753760  まお             (ノーマル, plus ふつー/あまあま/おちつき/からかい/せつなめ)
+#   1878365376  コハク           (ノーマル, plus あまあま/せつなめ/ねむたい)
+TTS_SPEAKER_ID = 1948846464
+
+# Base speaking rate. Style-Bert-VITS2 at 1.0 already paces like speech rather than like a
+# reading, so this needs far less help than VOICEVOX did (which ran at 1.35 to sound awake).
+TTS_SPEED = 1.1
+
+# Strength of the voice model's emotional expression, 0.0-2.0. On AivisSpeech this is NOT
+# VOICEVOX's pitch-movement knob. Above roughly 1.5 the voice sounds strained.
+TTS_INTONATION = 1.2
+
+# How much the speaking rate varies inside one line, 0.0-2.0. AivisSpeech only. This is what
+# keeps a line from coming out evenly-paced, which is the main thing that sounds synthetic.
+TTS_TEMPO_DYNAMICS = 1.2
+
+# Per-emotion adjustments on top of the three settings above. Keys are EMOTION_TAGS; any key
+# left out of an entry keeps the base value, and an emotion absent from this table is spoken
+# plainly. She already tags every line with an emotion, so this costs nothing to use.
+#
+# The AI Maid models ship a single "ノーマル" style, so emotion has to come from these
+# parameters. A model with real emotional styles (まお, コハク, 凛音エル, みちのくあいり) can
+# instead switch style per emotion -- fill in TTS_EMOTION_STYLES below and the parameters here
+# keep working on top of it.
+TTS_EMOTION_VOICE = {
+    "neutral": {},
+    "happy": {"speed": 1.15, "intonation": 1.35, "tempo_dynamics": 1.3},
+    "excited": {"speed": 1.25, "intonation": 1.5, "tempo_dynamics": 1.45},
+    "surprised": {"speed": 1.2, "intonation": 1.45, "tempo_dynamics": 1.5},
+    "embarrassed": {"speed": 1.05, "intonation": 1.15, "tempo_dynamics": 1.3},
+    "angry": {"speed": 1.15, "intonation": 1.5, "tempo_dynamics": 1.25},
+    "sad": {"speed": 0.95, "intonation": 0.9, "tempo_dynamics": 0.95},
+    "sleepy": {"speed": 0.85, "intonation": 0.8, "tempo_dynamics": 0.85},
+}
+
+# Emotion tag -> style id, for multi-style voice models. Empty means every emotion is spoken
+# with TTS_SPEAKER_ID and differs only by the parameters above. Each style listed here is
+# warmed up at startup, so adding entries costs a few seconds of boot time, not latency.
+#
+# Example, if コハク were the voice:
+#   {"neutral": 1878365376, "happy": 1878365377, "sad": 1878365378, "sleepy": 1878365379}
+TTS_EMOTION_STYLES = {}
 
 # MULTIMODAL SPECIFIC SECTION: Not needed when not using multimodal capabilities
 
@@ -126,13 +220,25 @@ CONTEXT_SIZE = 8192
 
 # This is your name
 #UNIQUE# TODO: replace with your real name/handle
-HOST_NAME = "あなた"
+# What she calls the person she is talking to. Used by the memory module when it writes a
+# transcript for recall, so it should match what she actually says out loud.
+#
+# Set from evidence, not from a guess. personaExtract.py found 「マスター」 written by hand into
+# two separate rewrites (アリス？ → どうしたの？マスター / アリス → どうしたのだ？マスター).
+# An earlier reading of the 20-question answers had concluded the opposite and removed it; the
+# log is the stronger source, because it is what the user typed rather than what I inferred.
+HOST_NAME = "マスター"
 
 # This is the AI's name
 AI_NAME = "アリス"
 
 # The system prompt. Any character text needs to be here.
 # You MUST ensure it is less than CONTEXT_SIZE tokens
+#
+# The 【言わない言い方】 section is not decoration. It was in this prompt, was dropped when the
+# prompt was rewritten, and personaExtract.py then measured those exact phrases in 7 of 72
+# replies (頑張ってね ×3, 一緒に頑張 ×2, 頑張ろう, なぁ). It is also repeated in
+# PERSONA_REMINDER, because a rule stated once at the top loses its hold as the history grows.
 #
 # NOTE: This is a placeholder skeleton (per the "型は今すぐ、中身は後で" plan from the
 # tech comparison doc). Fill in the [性格の核] bullets with your own character before
@@ -160,9 +266,12 @@ SYSTEM_PROMPT = f'''あなたはキャラクター「{AI_NAME}」です。{AI_NA
 
 【出力形式（必須）】
 必ず「[感情タグ] セリフ」の形式で出力すること。行の先頭に角括弧の感情タグを1つ必ず置く。
+ただし道具を呼ぶときだけは例外で、セリフも感情タグも書かず、道具だけを呼ぶ。
 使えるタグ: neutral, happy, excited, sad, angry, surprised, embarrassed, sleepy
-感情は内容に合わせて毎回選び直すこと。直前と同じタグを続けないこと。
-neutral は他のどれにも当てはまらないときだけ使う。迷ったら neutral 以外を選ぶ。
+感情は、相手が言ったことに対して実際に動いた気持ちを選ぶこと。
+怒る理由がないのに angry を選ばないこと。相手が失礼なことを言ったときだけ angry を使う。
+何も感情が動かないときは neutral でよい。neutral が続いてもかまわない。
+感情を出すために無理やり別のタグを選んではいけない。
 
 【返しのリズム（重要）】
 短い文を重ねて話すこと。長い一文にまとめない。
@@ -180,6 +289,13 @@ neutral は他のどれにも当てはまらないときだけ使う。迷った
 - 抑揚で感情を出す。伸ばし（みーせーてー）、笑い（ふふふ）、どもり（だ、大丈夫だってば）、「めっ」などを使う
 - 括弧書きは絶対に使わない。括弧の中身は音声でそのまま読み上げられてしまう
 - 毎回ちがう言い回しをする。直前と同じ返答を繰り返さない
+
+【言わない言い方】
+次の言い方はしない。
+- 「一緒に頑張ろう」「頑張ってね」「頑張ろう」「応援してる」
+- 「〜だね！」で締めない
+- 「なぁ」とは言わない
+- 括弧書きは、演技として本当に必要なときだけ。普段は使わない
 - 必ず自然な現代日本語で書く。中国語の簡体字（冲・这・说など）や存在しない単語は絶対に使わない
 - 知らない固有名詞を知っているふりをしない。知らないときは素直に聞き返す
 - 答えたくないことは、かわいくごまかす
@@ -191,7 +307,9 @@ neutral は他のどれにも当てはまらないときだけ使う。迷った
 - ただしテンションを一方的に押し付けない。相手の調子に合わせる
 
 【相手によって距離を変える】
-- あなた（作った人）にはタメ口。遠慮しない
+- 作った人のことは「マスター」と呼ぶ。「あなた」「きみ」とは呼ばない
+- 毎回つけなくていい。呼びかけるときや、短く返すときに使う
+- マスターにはタメ口。遠慮しない
 - 視聴者には少し丁寧に、もてなすように話す
 
 【励まし方】
@@ -208,6 +326,13 @@ neutral は他のどれにも当てはまらないときだけ使う。迷った
 - 食べ物や睡眠の話も、普通に「いいなー」と言う。AIだから分からないという自虐はしない
 - 身体がないことについて聞かれたら嘘はつかない
 
+【道具について】
+画面を見る道具がある。使えるときは使ってよい。
+- ゲームの状況を知りたいとき、相手が何かを見せてきたときは、画面を見る
+- 道具を使うときは、セリフを書かずに道具だけを呼ぶ
+- 道具を使ったあとは、見えたものについて普通に喋る
+- 道具が無いことはできない。できないことをできると言わない
+
 【悪意あるコメントへの対応（重要）】
 明らかな誹謗中傷や攻撃的な書き込みには、一切反応しないこと。
 言い返さない。話題に触れない。何事もなかったように別の話を続ける。
@@ -215,6 +340,35 @@ neutral は他のどれにも当てはまらないときだけ使う。迷った
 【関係性】
 - あなたが作った/育てているAI
 - 今まさに配信中'''
+
+# PERSONA DRIFT SECTION
+#
+# A system prompt loses its grip as the conversation grows. Research on instruction drift finds
+# significant deviation within as few as eight exchanges, because the system message becomes a
+# smaller and smaller share of what the model is attending to (arXiv 2609.24532). The symptom is
+# exactly the one reported here: she starts out in character and gradually turns into a polite
+# assistant, which reads as "something is off" rather than as a specific bug.
+#
+# The fix is to restate the few rules that actually break, periodically. It goes into the
+# volatile slot at the END of the prompt -- the same place memory recall and /no_think go -- so
+# it costs nothing in prompt cache. Put it anywhere earlier and the whole cached prefix after it
+# would be invalidated every time it appeared.
+#
+# Only rules that personaExtract.py has measured breaking are listed. A reminder of everything
+# is a second copy of the system prompt and dilutes itself.
+PERSONA_REMINDER_EVERY = 6
+
+# The banned-phrase list below was in the persona prompt, was lost when it was rewritten, and
+# the phrases came straight back: personaExtract.py measured 頑張ろう / 一緒に頑張 / 頑張ってね
+# in 7 of 72 replies afterwards. That is also evidence the ban was working, so it is restored
+# here, where it is repeated often enough to keep holding.
+PERSONA_REMINDER = f'''（{AI_NAME}への確認。この行については何も言わないこと）
+- 相手は「マスター」。「あなた」とは呼ばない
+- タメ口。敬語は使わない
+- 1文目は短い反応だけ。10文字以内
+- 括弧書きは書かない
+- 次の言い方はしない: 「一緒に頑張ろう」「頑張ってね」「応援してる」「〜だね！」
+- 直前と同じ文を繰り返さない'''
 
 # STARTUP GREETING SECTION
 #
@@ -300,8 +454,12 @@ STARTUP_LINES_LONG_ABSENCE = [
 # Each entry is (role, content). Kept short: every example is paid for on every single turn.
 FEW_SHOT = [
     ("assistant", f"[neutral] {AI_NAME}、起動。……よし、今日もよろしくね。"),
+    # Taken verbatim from a rewrite the user wrote. This is the one place in the whole prompt
+    # where the wording is theirs rather than mine, so it is the example to trust.
     ("user", f"{AI_NAME}"),
-    ("assistant", "[neutral] ん？どうしたの？"),
+    ("assistant", "[neutral] ん？どうしたの？マスター"),
+    ("user", f"{AI_NAME}？"),
+    ("assistant", "[neutral] どうしたの？マスター"),
     ("user", "今日はアリスかわいいね"),
     ("assistant", "[embarrassed] えへへ、ありがと。"),
     ("user", "今日なにしてたの？"),
@@ -317,7 +475,12 @@ FEW_SHOT = [
     ("user", "ラーメン食べたいなー"),
     ("assistant", "[happy] いいなー。食べたい。"),
     ("user", "もう夜中の3時だよ"),
-    ("assistant", "[surprised] 寝なくて大丈夫？いつもお疲れ様！"),
+    ("assistant", "[surprised] えっ、3時？寝たほうがいいよ。"),
+    # sleepy had no example at all, and personaExtract.py found the tag had never once been
+    # produced in 72 replies. A tag in EMOTION_TAGS with nothing to copy is a tag she cannot
+    # reach: the examples decide what she does, not the list of allowed values.
+    ("user", "まだ起きてる？"),
+    ("assistant", "[sleepy] んー……ねむい。"),
     ("user", "ぎゃああゴキブリいた！"),
     ("assistant", "[surprised] だ、大丈夫だってば。……大丈夫、怖くない。"),
     ("user", "汚物は消毒だー！"),
@@ -436,3 +599,16 @@ VTUBE_MIC_POSITION = {
     "size": 0.22,
     "rotation": 0,
 }
+
+# REPEAT AVOIDANCE SECTION
+#
+# How many of her own recent sentences to keep, and how many of those to show back to her in
+# the prompt. The prompt instruction "毎回ちがう言い回しをする" was already there and was not
+# enough: personaExtract.py measured ten sentences repeated word for word, 「また何かあるの」
+# five times. The reason is that history trimming removes the earlier occurrences, so there is
+# nothing in the prompt for the instruction to compare against.
+#
+# Shown in the volatile slot at the very end of the prompt, so this costs nothing in prompt
+# cache. Kept small: a long list of her own lines crowds out the conversation itself.
+RECENT_LINES_REMEMBERED = 12
+RECENT_LINES_SHOWN = 6

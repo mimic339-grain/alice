@@ -130,7 +130,7 @@ class ConversationLog:
 
     # ---- things that are not turns ---------------------------------------------------------
 
-    def record_feedback(self, turn_id, verdict, user, alice, better, emotion):
+    def record_feedback(self, turn_id, verdict, user, alice, better, emotion, why=""):
         self._write({
             "type": "feedback",
             "turn_id": turn_id,
@@ -138,6 +138,7 @@ class ConversationLog:
             "user": user,
             "alice": alice,
             "better": better,
+            "why": why,
             "emotion": emotion,
         })
 

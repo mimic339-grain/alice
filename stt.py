@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from RealtimeSTT import AudioToTextRecorder
 from audioDevices import resolve_input_device, check_input_health
@@ -16,8 +17,26 @@ class STT:
         self.tts = tts
         self.llm_api = llm_api
 
+    # Whisper always returns something, so noise and half-syllables come back as "あ." or "まず."
+    # or an empty string. Answering those is worse than ignoring them: there is nothing to react
+    # to, so the reply is invented, and the log showed her turning that into random irritation
+    # ("[angry] うざったい。話しないで。" to an input of just "アリス.").
+    MIN_MEANINGFUL_CHARS = 3
+
+    def is_meaningful(self, text):
+        """False for transcriptions too short or too empty to be something a person said."""
+        stripped = re.sub(r'[\s。、．，.,!?！？…]', '', text or '')
+        if len(stripped) < self.MIN_MEANINGFUL_CHARS:
+            return False
+        # A run of one repeated character ("ああああ") is noise, not speech.
+        return len(set(stripped)) > 1
+
     def process_text(self, text):
         if not self.enabled:
+            return
+
+        if not self.is_meaningful(text):
+            print(f"STT IGNORED (too short to be speech): {text!r}")
             return
 
         print("STT OUTPUT: " + text)

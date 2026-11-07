@@ -149,6 +149,11 @@ class SocketIOServer:
                 "user": entry.get("user", ""),            # what was said to her
                 "alice": entry.get("alice", ""),          # what she actually replied
                 "better": entry.get("better", ""),        # what she should have said
+                # What is wrong with the reply, in the user's words. Kept separate from
+                # "better" because the two answer different questions: a rewrite shows the
+                # target, a note explains the rule being broken ("怒る理由がないのに怒ってる"),
+                # and the note is what turns one example into a fix to the persona.
+                "why": entry.get("why", ""),
                 "emotion": entry.get("emotion", ""),
             }
             with open(feedback_path, 'a', encoding='utf-8') as f:
@@ -157,12 +162,13 @@ class SocketIOServer:
             # the prompt that produced the reply being judged.
             self.signals.log.record_feedback(
                 entry.get("turn_id"), record["verdict"], record["user"], record["alice"],
-                record["better"], record["emotion"])
+                record["better"], record["emotion"], record["why"])
 
             total = sum(1 for _ in open(feedback_path, encoding='utf-8'))
             label = "OK" if record["verdict"] == "good" else "REWRITE"
             print(f"FEEDBACK [{label}] {record['alice'][:30]!r}"
                   + (f" -> {record['better'][:30]!r}" if record['better'] else "")
+                  + (f"  理由: {record['why'][:40]}" if record['why'] else "")
                   + f"  (total {total})")
             await sio.emit('feedback_count', total)
 
