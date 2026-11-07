@@ -195,9 +195,12 @@ def greet(signals, tts, llm=None):
             print("GREETING: using a written line (model unavailable)")
 
         signals.current_emotion = emotion
+        # History keeps the tag: it is the format she has to produce, so her own last line has
+        # to demonstrate it. The chat window does not -- it is for a person to read, and
+        # 「[happy] おかえり」 on screen is just a leaked implementation detail.
         signals.history.append({"role": "assistant",
                                 "content": f"[{emotion}] {STARTUP_PREFIX}{line}"})
-        signals.sio_queue.put(("next_chunk", f"[{emotion}] {line}"))
+        signals.sio_queue.put(("next_chunk", line))
         signals.sio_queue.put(("current_emotion", emotion))
         print(f"GREETING: {STARTUP_PREFIX}{line}")
         signals.log.record_event("startup_greeting", emotion=emotion,

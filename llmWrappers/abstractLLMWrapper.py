@@ -30,6 +30,11 @@ class AbstractLLMWrapper:
         # here rather than read out of history because history gets trimmed, which is precisely
         # how the same line came back five times.
         self._recent_lines = collections.deque(maxlen=max(1, RECENT_LINES_REMEMBERED))
+        # Display gate state (see display_chunk). Initialised here as well as per reply so
+        # that nothing can reach the gate before the first stream starts.
+        self._display_pending = ''
+        self._display_tag_done = True
+        self._display_trim = False
 
         load_dotenv()
 
@@ -297,6 +302,57 @@ class AbstractLLMWrapper:
         """Remove bracketed acting notes. For the voice only -- never for what is shown."""
         return cls.STAGE_DIRECTION.sub('', text or '').strip()
 
+    # The emotion tag is generated as ordinary text, so it arrives in the stream like anything
+    # else -- and split wherever the tokeniser happens to split it. The chat window showed
+    # 「[」 and then 「neutral] え？」 as two separate pieces, because clean_sentence strips the
+    # tag for the voice while the window is fed the raw chunks so text appears while she is
+    # still generating.
+    #
+    # So the opening chunks are held back only until it is clear whether they are a tag.
+    # Waiting for the first complete sentence instead would be simpler and would throw away
+    # streaming, which is the only reason chunks are sent at all.
+    EMOTION_TAG_FULL = re.compile(r'^\s*\[(\w+)\]\s*')
+    EMOTION_TAG_PARTIAL = re.compile(r'^\s*(\[\w*)?$')
+
+    def display_chunk(self, chunk):
+        """Return the part of this chunk to show, holding back an incomplete emotion tag."""
+        if self._display_tag_done:
+            if self._display_trim:
+                chunk = chunk.lstrip()
+                self._display_trim = not chunk
+            return chunk
+
+        self._display_pending += chunk
+
+        full = self.EMOTION_TAG_FULL.match(self._display_pending)
+        if full and full.group(1).lower() in EMOTION_TAGS:
+            self._display_tag_done = True
+            shown = self._display_pending[full.end():]
+            self._display_pending = ''
+            # The space that follows the tag is often in the NEXT chunk, because the tag ends on
+            # a token boundary: "[", "neutral", "]", " え？". The regex cannot eat a space it has
+            # not been given, so the window showed 「 え？」 with a leading gap. Keep trimming
+            # until something visible arrives.
+            self._display_trim = not shown
+            return shown
+
+        if self.EMOTION_TAG_PARTIAL.match(self._display_pending):
+            return ''          # could still turn into a tag; keep holding
+
+        # It cannot be a tag any more -- release everything held so far, including a bracket
+        # that turned out to be something else ("[DONE]", or her using a bracket herself).
+        self._display_tag_done = True
+        shown, self._display_pending = self._display_pending, ''
+        return shown
+
+    def flush_display(self):
+        """Show anything the gate is still holding, so it cannot be swallowed."""
+        if self._display_pending:
+            self.signals.sio_queue.put(("next_chunk", self._display_pending))
+            self._display_pending = ''
+        self._display_tag_done = True
+        self._display_trim = False
+
     def clean_sentence(self, sentence, is_first, reflex_spoken):
         """Apply every text fix-up to one sentence, in the order they must happen.
 
@@ -372,6 +428,14 @@ class AbstractLLMWrapper:
         spoken_message = ''
         buffer = ''
         tool_calls = []
+        # The tag only ever appears at the start of the first reply of a turn; a follow-up
+        # generated after a tool call continues the same reply and carries no tag.
+        if is_first:
+            self._display_pending = ''
+            self._display_tag_done = False
+            self._display_trim = False
+        else:
+            self._display_tag_done = True
         # The reply as generated, before the emotion tag is stripped and before any sentence
         # is filtered. The log keeps this next to what was actually spoken.
         self._last_raw_reply = ''
@@ -397,7 +461,9 @@ class AbstractLLMWrapper:
                 continue
             buffer += chunk
             self._last_raw_reply += chunk
-            self.signals.sio_queue.put(("next_chunk", chunk))
+            shown = self.display_chunk(chunk)
+            if shown:
+                self.signals.sio_queue.put(("next_chunk", shown))
 
             while True:
                 # Match a RUN of terminators, so "？！" ends one sentence instead of two
@@ -418,6 +484,7 @@ class AbstractLLMWrapper:
                 self.signals.AI_speaking = True
             spoken_message += self.speak_sentence(buffer, is_first, reflex_spoken)
 
+        self.flush_display()
         return spoken_message, tool_calls
 
     def run_tool_calls(self, tool_calls):
@@ -460,6 +527,14 @@ class AbstractLLMWrapper:
 
         if self.llmState.next_cancelled:
             self.llmState.next_cancelled = False
+            # Order matters, and getting it wrong is silent: reset_next_message closes the
+            # current bubble, so sending it first left reply_cancelled with nothing to mark and
+            # the abandoned fragment stayed on screen looking like a finished reply.
+            #
+            # Chunks already sent are still on screen with nothing to say they were abandoned,
+            # and there is no AI OUTPUT line for them either -- an orphan half-sentence that
+            # reads like she said something strange.
+            self.signals.sio_queue.put(("reply_cancelled", None))
             self.signals.sio_queue.put(("reset_next_message", None))
             self.signals.AI_thinking = False
             log.end_turn(turn_id, raw_reply, spoken_message, self.signals.current_emotion,
@@ -481,6 +556,11 @@ class AbstractLLMWrapper:
 
         print("AI OUTPUT: " + spoken_message)
         self.signals.last_message_time = time.time()
+        # The reply is complete. The chat window used to work this out from AI_speaking going
+        # false, which happens BETWEEN sentences as the TTS queue drains, so one reply was
+        # chopped into several bubbles mid-word (「え？聞いてない」 / 「よ。」). Only the server
+        # knows where a reply actually ends.
+        self.signals.sio_queue.put(("reply_done", None))
         self.signals.AI_thinking = False
 
         # Store what was actually said, not the raw generation -- otherwise the emotion tag and

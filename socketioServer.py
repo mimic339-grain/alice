@@ -293,7 +293,12 @@ class SocketIOServer:
         chat_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chat.html')
 
         async def chat_page(_request):
-            return web.FileResponse(chat_html)
+            # no-store, because aiohttp's FileResponse sets no Cache-Control and browsers then
+            # apply heuristic caching to it. Measured: after editing chat.html the page in the
+            # browser still had the old script -- the server was serving the new file while the
+            # tab kept running the old one, so a fix that worked looked like a fix that did not.
+            # The page is a few KB off localhost; there is nothing to gain by caching it.
+            return web.FileResponse(chat_html, headers={"Cache-Control": "no-store"})
 
         app.router.add_get('/', chat_page)
         app.router.add_get('/chat', chat_page)

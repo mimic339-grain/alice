@@ -31,8 +31,29 @@ $textgen = "$env:USERPROFILE\source\repos\textgen\textgen-4.9"
 $aivis   = "$env:LOCALAPPDATA\Programs\AivisSpeech-Engine\Windows-x64\run.exe"
 
 function Test-Port($port) {
-    $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-    return $null -ne $c
+    # Ground truth is "can something connect to it", not "does a listener enumerate".
+    #
+    # Get-NetTCPConnection -State Listen does not see the AivisSpeech engine. Its loopback
+    # listening sockets come back with an EMPTY State field, so the -State Listen filter drops
+    # them and the port reads as closed while the engine happily answers GET /version with
+    # 200 "1.2.0". netstat -ano shows the same thing: ESTABLISHED rows for 10101, no LISTENING
+    # row. The LLM servers on 5000/5002 do report Listen normally, so this looks like a
+    # per-process quirk rather than anything configurable.
+    #
+    # That false negative is not harmless. It made the stale-process cleanup below kill an
+    # engine that had been serving for three hours, and then made the wait loop print
+    # "DID NOT COME UP" for the healthy replacement. A connect attempt cannot be fooled this
+    # way, and it is what the callers actually care about.
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $connect = $client.ConnectAsync("127.0.0.1", $port)
+        if ($connect.Wait(500) -and $client.Connected) { return $true }
+        return $false
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
 }
 
 # --- AivisSpeech ---

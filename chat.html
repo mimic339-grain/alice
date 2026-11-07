@@ -32,6 +32,9 @@
   .msg.me{ align-self:flex-end; background:var(--me); }
   .msg.alice{ align-self:flex-start; background:var(--alice); }
   .msg.sys{ align-self:center; background:none; color:var(--muted); font-size:12px; font-family:ui-monospace,monospace; padding:2px; }
+  /* A spoken turn she threw away as her own echo. Shown, because silently discarding
+     what the microphone heard is how an echo loop stays invisible. */
+  .msg.dropped{ align-self:flex-end; background:none; border:1px dashed var(--muted); color:var(--muted); font-size:12px; }
   .who{ font-size:11px; color:var(--muted); margin-bottom:3px; font-family:ui-monospace,monospace; }
   .emo{ font-size:11px; color:var(--accent); font-family:ui-monospace,monospace; }
 
@@ -130,13 +133,36 @@ socket.on('next_chunk', (chunk) => {
 socket.on('reset_next_message', () => { bubble = null; });
 
 socket.on('AI_thinking', (v) => { if (v) stateEl.textContent = '考え中…'; });
-socket.on('AI_speaking', (v) => {
-  stateEl.textContent = v ? '発話中' : '';
-  // She has stopped: the reply is complete, so it can be judged as a whole.
-  if (!v && bubble) {
-    attachFeedback(bubble, bubble.textContent.replace(/^アリス/, '').trim());
-    bubble = null;
-  }
+// AI_speaking is only a status light. It goes false between sentences while the TTS queue
+// drains, so closing the bubble on it split single replies mid-word.
+socket.on('AI_speaking', (v) => { stateEl.textContent = v ? '発話中' : ''; });
+// The server says when a reply is finished, which is the only place that knows.
+socket.on('reply_done', () => {
+  if (!bubble) return;
+  attachFeedback(bubble, bubble.textContent.replace(/^アリス/, '').trim());
+  bubble = null;
+});
+// Generation was abandoned part-way (she was interrupted). The text already on screen is a
+// fragment she never finished saying, so label it rather than leaving it to be read as a reply.
+socket.on('reply_cancelled', () => {
+  if (!bubble) return;
+  const mark = document.createElement('span');
+  mark.style.color = 'var(--muted)';
+  mark.style.fontSize = '12px';
+  mark.textContent = ' …（中断）';
+  bubble.appendChild(mark);
+  bubble = null;
+});
+
+// What the microphone actually heard. Without this the window showed only typed messages, so a
+// misheard sentence was invisible and her answer to it looked like a personality problem.
+socket.on('heard', (text) => {
+  bubble = null;
+  lastUserMessage = text;
+  add('me', 'あなた（声）', text);
+});
+socket.on('heard_dropped', (text) => {
+  add('dropped', null, '🔇 自分の声として破棄: ' + text);
 });
 socket.on('current_emotion', (e) => {
   if (e) { currentEmotion = e; stateEl.textContent += '  [' + e + ']'; }

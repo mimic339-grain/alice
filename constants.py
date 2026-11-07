@@ -28,7 +28,37 @@ INPUT_DEVICE_INDEX = None
 # it is faulty: it emits a full-scale sub-300 Hz rumble instead of audio, which Silero VAD
 # correctly refuses to treat as speech. check_input_health() says so at startup.
 INPUT_DEVICE_NAME = ["QuadCast", "USB", "マイク配列"]
-OUTPUT_DEVICE_INDEX = 3  # スピーカー (Realtek Audio)
+# Index 3 is "Microsoft サウンド マッパー - Output", i.e. whatever Windows currently calls the
+# default playback device -- NOT スピーカー, which this line used to claim and which is index 6.
+# Following the Windows default is usually what you want, because plugging in headphones then
+# moves her voice with it. The catch is that it also follows the default back to the speakers,
+# and her voice out of a speaker is audible to the microphone (see STT_ECHO_GUARD below). Pin
+# this to the headphone endpoint if that keeps happening.
+OUTPUT_DEVICE_INDEX = 3
+
+# Whether to throw away transcriptions that are the AI hearing herself.
+#
+# Needed whenever her voice is audible to the microphone at all -- open-backed headphones leak
+# enough, and speakers obviously do. Without it the loop is: she speaks, the mic hears it,
+# Whisper turns it into a sentence, that sentence is filed as something the user said, and she
+# answers it. Measured here: 「アリス、起動。おひさま、こんばんわ。」 came back as 「お前の前は.」
+# and 「お前はアジで.」, and she replied 「え？そんなこと言ってないよ。」 to nobody.
+#
+# Turning this off is only safe with closed headphones, and costs nothing to leave on: a person
+# who starts talking more than STT_ECHO_GUARD_TAIL after she stops is unaffected.
+STT_ECHO_GUARD = True
+# Seconds after she goes quiet during which a NEWLY OPENED recording is still assumed to be her.
+# The audio is buffered ahead of the AI_speaking flag, so a recording that opens just after she
+# stops can still contain the tail of her last word. Raise it if echoes still get through;
+# every bit of it is time a human cannot answer her in, so keep it small.
+STT_ECHO_GUARD_TAIL = 0.5
+# Whether sound arriving while she talks aborts her current sentence.
+#
+# Wanted behaviour with a clean mic -- it is what makes talking over her feel immediate. With
+# her own voice reaching the mic it fires on herself and chops her sentences mid-word, which
+# nothing in the code can distinguish from a person interrupting. Set to False if her replies
+# keep getting cut short.
+STT_BARGE_IN = True
 
 # How many seconds of silence before the AI speaks up on its own. Set to 0 to turn this off.
 #

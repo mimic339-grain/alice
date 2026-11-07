@@ -1,3 +1,4 @@
+import collections
 import logging
 import re
 import time
@@ -16,6 +17,18 @@ class STT:
         # the human starts talking again, instead of letting the AI talk over them (design doc sec.04.2).
         self.tts = tts
         self.llm_api = llm_api
+        # Echo guard state: one snapshot per recording, taken when the recording OPENS, because
+        # by the time Whisper has finished she has long since gone quiet.
+        #
+        # A QUEUE and not a single value. Whisper 'small' runs on the CPU here and falls behind,
+        # so several recordings can be open or waiting while an earlier one is still being
+        # transcribed. With one shared slot, the later recording's snapshot overwrote the
+        # earlier one's and the transcription was judged against the wrong recording -- which is
+        # exactly how 「なんでもあるのかな？」 came back as 「何ではあるのか.」 and got through.
+        # RealtimeSTT transcribes recordings in the order they finished, so the oldest snapshot
+        # belongs to the next transcription. Bounded in case the two ever get out of step: a
+        # wrong-but-recent snapshot beats unbounded growth.
+        self._recording_snapshots = collections.deque(maxlen=8)
 
     # Whisper always returns something, so noise and half-syllables come back as "あ." or "まず."
     # or an empty string. Answering those is worse than ignoring them: there is nothing to react
@@ -31,7 +44,40 @@ class STT:
         # A run of one repeated character ("ああああ") is noise, not speech.
         return len(set(stripped)) > 1
 
+    def is_echo(self):
+        """True when this transcription is most likely the AI's own voice coming back in.
+
+        Measured on this machine: she said 「アリス、起動。おひさま、こんばんわ。」, the
+        microphone heard it, and Whisper returned 「お前の前は.」 and 「お前はアジで.」. Both
+        became user turns, and she answered them with 「え？そんなこと言ってないよ。」 -- a reply
+        that reads like a persona failure and is nothing of the kind.
+
+        The guard that was here before checked signals.AI_speaking inside process_text, which
+        never fires: post_speech_silence_duration plus transcription time means Whisper returns
+        well after AI_speaking has gone back to False. The log showed the sequence plainly --
+        "AI Talking Stop", then "STT OUTPUT", then "New Message".
+
+        So both halves of the question are answered at recording_start instead. A recording
+        that opened while she was talking is her. A recording that opened in the moment right
+        after she stopped still holds the tail of her last word, because the audio is buffered
+        ahead of the flag. Without acoustic echo cancellation, timing is the only signal there
+        is.
+        """
+        if self._recording_snapshots:
+            overlapped, quiet_for = self._recording_snapshots.popleft()
+        else:
+            # No snapshot to pair with. Fall back to reading the state now, which is weak but
+            # better than treating an unknown recording as definitely a person.
+            overlapped = self.signals.AI_speaking
+            quiet_for = time.time() - self.signals.ai_quiet_since
+        return overlapped or quiet_for < STT_ECHO_GUARD_TAIL
+
     def process_text(self, text):
+        # Consumed first, unconditionally: is_echo() pops the snapshot queue, so returning
+        # early without calling it would leave every later transcription paired with the wrong
+        # recording. One transcription in, one snapshot out, whatever happens next.
+        echo = self.is_echo()
+
         if not self.enabled:
             return
 
@@ -40,6 +86,15 @@ class STT:
             return
 
         print("STT OUTPUT: " + text)
+
+        if STT_ECHO_GUARD and echo:
+            # Dropped completely -- not logged as a turn, not appended to history, no prompt.
+            # Appending it "but not answering it" is not a safe middle ground: it stays in the
+            # context window as something the user supposedly said, and she answers it on the
+            # next real turn instead.
+            print(f"STT DROPPED (her own voice coming back): {text!r}")
+            self.signals.sio_queue.put(("heard_dropped", text))
+            return
 
         # Barge-in, second half: abandon a reply she is still generating, now that there is
         # actual transcribed speech to replace it with.
@@ -52,17 +107,36 @@ class STT:
         if self.signals.AI_thinking and self.llm_api is not None:
             self.llm_api.cancel_next()
 
+        # Show it. The chat window had no way to display a spoken turn at all, so the only
+        # visible sign of a misheard sentence was her answering something nobody said -- which
+        # reads as the persona being broken when it is the transcription. 「ゲーム作りたい」
+        # came back as 「キノクロからもう一度」 and she answered that.
+        self.signals.sio_queue.put(("heard", text))
+
         self.signals.current_turn_id = self.signals.log.begin_turn("voice", text)
         self.signals.history.append({"role": "user", "content": text})
 
         self.signals.last_message_time = time.time()
+        # Kept as a second line of defence. It cannot catch an echo on its own -- that is what
+        # is_echo() above is for -- but it still stops a genuine barge-in from queueing a
+        # prompt on top of the reply she is in the middle of speaking.
         if not self.signals.AI_speaking:
             self.signals.new_message = True
 
     def recording_start(self):
+        # Snapshot for the echo guard, taken before anything else: was she talking when this
+        # recording opened, and if not, how long had she been quiet? Read again in
+        # process_text, where neither question can still be answered.
+        self._recording_snapshots.append(
+            (self.signals.AI_speaking, time.time() - self.signals.ai_quiet_since))
+
         # Barge-in, first half: stop the voice the moment sound arrives, so talking over her
         # feels immediate. Worst case a stray noise clips a word.
-        if self.signals.AI_speaking and self.tts is not None:
+        #
+        # With her own voice audible to the microphone this also fires on herself, cutting her
+        # own sentences short. Nothing here can tell her voice from a person's, so STT_BARGE_IN
+        # exists to turn the feature off on a machine where that keeps happening.
+        if STT_BARGE_IN and self.signals.AI_speaking and self.tts is not None:
             self.tts.API.abort_current()
 
         self.signals.human_speaking = True

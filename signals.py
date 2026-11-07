@@ -1,4 +1,5 @@
 import queue
+import time
 
 from conversationLog import ConversationLog
 
@@ -15,6 +16,11 @@ class Signals:
         self._human_speaking = False
         self._AI_speaking = False
         self._AI_thinking = False
+        # When the AI last stopped talking. The transcription of her own voice coming back in
+        # through the microphone does not arrive until after she has already gone quiet, so
+        # "is she speaking?" is the wrong question by the time STT can answer it. The echo
+        # guard in stt.py needs to know when she stopped, not whether she is stopped.
+        self.ai_quiet_since = 0.0
         self._last_message_time = 0.0
         self._new_message = False
         self._tts_ready = False
@@ -55,6 +61,8 @@ class Signals:
     @AI_speaking.setter
     def AI_speaking(self, value):
         self._AI_speaking = value
+        if not value:
+            self.ai_quiet_since = time.time()
         self.sio_queue.put(('AI_speaking', value))
         if value:
             print("SIGNALS: AI Talking Start")
